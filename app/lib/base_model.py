@@ -9,12 +9,17 @@ All application models should inherit from this base class to
 ensure consistent audit trail across the system.
 """
 
+from __future__ import annotations
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Iterable, Set
 from app.extensions import db
 
+from sqlalchemy.orm import DeclarativeBase, inspect as sa_inspect
 
-class BaseModel(db.Model):
+class Base(DeclarativeBase):
+    pass
+
+class BaseModel(Base):
     """
     Abstract base model with audit fields.
     
@@ -72,35 +77,81 @@ class BaseModel(db.Model):
         comment="ID of the user who soft deleted this record"
     )
     
-    def to_dict(self, include_audit: bool = True) -> Dict[str, Any]:
+    def to_dict(
+        self,
+        deep: bool = False,
+        include: Iterable[str] | None = None,
+        exclude: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
         """
-        Convert model instance to dictionary.
-        
-        Args:
-            include_audit: Whether to include audit fields in the output
-            
-        Returns:
-            Dictionary representation of the model
+        Serializa colunas e (opcionalmente) relações.
+        - include/exclude: nomes de atributos (colunas/props)
+        - deep=True: carrega relações 1..N/N..1 superficialmente (evita recursão)
         """
-        result = {}
-        
-        # Get all columns except audit fields initially
-        for column in self.__table__.columns:
-            if not include_audit and column.name in {
-                'created_at', 'updated_at', 'created_by', 
-                'updated_by', 'deleted_at', 'deleted_by'
-            }:
+        include = set(include or [])
+        exclude: Set[str] = set(exclude or [])
+        mapper = sa_inspect(self.__class__)
+        data: dict[str, Any] = {}
+
+        # colunas simples
+        for col in mapper.columns:
+            name = col.key
+            if include and name not in include:
                 continue
-                
-            value = getattr(self, column.name)
-            
-            # Handle datetime serialization
-            if isinstance(value, datetime):
-                result[column.name] = value.isoformat()
-            else:
-                result[column.name] = value
-                
-        return result
+            if name in exclude:
+                continue
+            data[name] = getattr(self, name)
+
+        # propriedades híbridas (@hybrid_property) e synonyms opcionais
+        for prop in getattr(mapper, "all_orm_descriptors", []):
+            name = getattr(prop, "__name__", None)
+            if not name or name in data:
+                continue
+            if include and name not in include:
+                continue
+            if name in exclude:
+                continue
+            try:
+                value = getattr(self, name)
+            except Exception:
+                continue
+            if callable(value):
+                continue
+            # valores simples apenas
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                data[name] = value
+
+        # relações (shallow por padrão; deep expande listas como refs compactas)
+        if deep:
+            for rel in mapper.relationships:
+                name = rel.key
+                if include and name not in include:
+                    continue
+                if name in exclude:
+                    continue
+                value = getattr(self, name)
+                if value is None:
+                    data[name] = None
+                elif rel.uselist:
+                    data[name] = [self._ref(item) for item in value]
+                else:
+                    data[name] = self._ref(value)
+
+        # normalização datetimes -> isoformat
+        for k in ("created_at", "updated_at"):
+            if k in data and isinstance(data[k], datetime):
+                data[k] = data[k].isoformat()
+
+        return data
+
+    @staticmethod
+    def _ref(obj: Any, label: str = "name") -> dict[str, Any] | None:
+        if obj is None:
+            return None
+        obj_id = getattr(obj, "id", None)
+        label_val = getattr(obj, label, None) if hasattr(obj, label) else None
+        return {"id": obj_id, label: label_val}
+    
     
     def is_deleted(self) -> bool:
         """Check if this record is soft deleted."""
