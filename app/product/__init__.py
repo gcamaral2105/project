@@ -1,33 +1,25 @@
 """
-Product Module
-==============
+Lib - Biblioteca interna da aplicação.
 
-This module contains all product-related functionality including:
-- Models (Product)
-- Repository layer (ProductRepository)
-- Service layer (ProductService)
-- Routes (Product API endpoints)
+Este módulo contém componentes reutilizáveis que podem ser usados
+por qualquer parte da aplicação ou até mesmo extraídos como
+biblioteca externa no futuro.
 """
 
-from flask import Blueprint
+__version__ = "1.0.0"
+__author__ = "HQ Development Team"
 
-# Legacy blueprint (keeping for compatibility)
-mine_bp = Blueprint('mine_bp', __name__,
-                    template_folder='templates',
-                    static_folder='static')
+# Imports principais
+from .repository import BaseRepository, RepositoryMixin
+from .services import BaseService
+from .utils import ValidationUtils, StringUtils
+from .base_model import BaseModel
 
-# Import routes and services
-from app.product.routes import product_bp
-from app.product.services import ProductService
-from app.product.repository.product_repository import SQLAlchemyProductRepository
-
-# Export main components
 __all__ = [
-    'mine_bp',
-    'product_bp', 
-    'ProductService',
-    'SQLAlchemyProductRepository'
+    'BaseRepository',
+    'RepositoryMixin',
+    'BaseService', 
+    'ValidationUtils',
+    'StringUtils',
+    'BaseModel'
 ]
-
-# Legacy import (keeping for compatibility)
-from app.product import routes
