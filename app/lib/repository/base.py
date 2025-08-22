@@ -16,7 +16,8 @@ from typing import Any, Callable, Dict, Generic, List, Optional, Type, TypeVar, 
 
 from flask_sqlalchemy import SQLAlchemy
 from flask_sqlalchemy.model import Model  # <- **static type, not a variable**
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, select, func, text
+from sqlalchemy.orm import with_for_update
 from sqlalchemy.exc import IntegrityError as SQLIntegrityError
 
 # --------------------------------------------------------------------------- #
@@ -255,3 +256,27 @@ class BaseRepository(Generic[M], ABC):
     def find_by_criteria(self, criteria: Dict[str, Any]) -> List[M]:
         """Concrete repositories must implement their preferred search pattern."""
         raise NotImplementedError
+    
+    def list_paginated(self, page: int = 1, per_page: int = 20, filters: dict | None = None):
+        query = self.model_class.query
+        if self.ENABLE_SOFT_DELETE and hasattr(self.model_class, "deleted_at"):
+            query = query.filter(self.model_class.deleted_at.is_(None))
+        if filters:
+            for f, v in filters.items():
+                if hasattr(self.model_class, f):
+                    query = query.filter(getattr(self.model_class, f) == v)
+        total = query.count()
+        items = query.offset((page - 1) * per_page).limit(per_page).all()
+        return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+    def lock_for_update(self, entity_id: int | str):
+        # requer transação ativa (use @transactional no método chamador)
+        stmt = select(self.model_class).where(self.model_class.id == entity_id).with_for_update()
+        return self.session.execute(stmt).scalars().first()
+
+    def count(self, **criteria):
+        query = self.model_class.query
+        for f, v in (criteria or {}).items():
+            if hasattr(self.model_class, f):
+                query = query.filter(getattr(self.model_class, f) == v)
+        return query.count()
