@@ -360,4 +360,20 @@ def create_validation_rules(**kwargs) -> Dict[str, Any]:
     )
     ```
     """
+
     return kwargs
+
+def positive(value, field="value"):
+    if value is None or value <= 0:
+        raise ValueError(f"{field} must be > 0")
+    return value
+
+def non_negative(value, field="value"):
+    if value is None or value < 0:
+        raise ValueError(f"{field} must be >= 0")
+    return value
+
+def valid_period(start: date, end: date):
+    if not start or not end or start > end:
+        raise ValueError("Invalid period: start must be <= end")
+    return True
