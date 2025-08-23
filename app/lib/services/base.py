@@ -2,9 +2,8 @@
 Advanced BaseService
 ====================
 
-Adds high‑level features on top of a plain repository:
-
-* built‑in in‑process cache
+Adds high-level features on top of a plain repository:
+* built-in in-process cache
 * rich validation helpers
 * performance & error metrics
 * event / hook system
@@ -14,12 +13,11 @@ The service expects *optionally* a repository with methods such as
 ``paginate`` or any custom functions you will call through
 ``safe_repository_operation``.
 """
-
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -44,7 +42,7 @@ class BaseService:
         # metrics
         self._metrics: Dict[str, Any] = {
             "operations": {},  # per‑method timing & counts
-            "errors": {},      # error_code → count
+            "errors": {},      # error_code → count
             "cache_hits": 0,
             "cache_misses": 0,
         }
@@ -146,8 +144,8 @@ class BaseService:
 
     def _cache_set(self, key: str, value: Any, timeout: int | None = None) -> None:
         self._cache[key] = (value, datetime.utcnow())
+        # If you want per-key TTLs, wire a scheduler/TTL store here (e.g., Redis).
         if timeout and timeout != self._cache_timeout:
-            # In production you would schedule eviction (Celery/Redis TTL/…)
             pass
 
     def clear_cache(self, pattern: str | None = None) -> None:
@@ -174,10 +172,13 @@ class BaseService:
         """
         Generic field‑level validation rules.
 
+        Example
+        -------
         constraints = {
             "name": {"type": str, "min_length": 3},
-            "age":  {"type": int, "min_value": 0},
-            ...
+            "age": {"type": int, "min_value": 0},
+            "email": {"type": str, "pattern": r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"},
+            "custom": {"validator": lambda v: (True, "")},
         }
         """
         out: List[str] = []
@@ -197,27 +198,29 @@ class BaseService:
                 min_len = cfg.get("min_length")
                 max_len = cfg.get("max_length")
                 if min_len and len(val.strip()) < min_len:
-                    out.append(f"Field '{field}' must contain ≥ {min_len} chars")
+                    out.append(f"Field '{field}' must contain ≥ {min_len} chars")
                 if max_len and len(val.strip()) > max_len:
-                    out.append(f"Field '{field}' must contain ≤ {max_len} chars")
+                    out.append(f"Field '{field}' must contain ≤ {max_len} chars")
 
             # numeric bounds
             if isinstance(val, (int, float)):
                 min_val = cfg.get("min_value")
                 max_val = cfg.get("max_value")
                 if min_val is not None and val < min_val:
-                    out.append(f"Field '{field}' must be ≥ {min_val}")
+                    out.append(f"Field '{field}' must be ≥ {min_val}")
                 if max_val is not None and val > max_val:
-                    out.append(f"Field '{field}' must be ≤ {max_val}")
+                    out.append(f"Field '{field}' must be ≤ {max_val}")
 
             # regex
-            if (pat := cfg.get("pattern")) and isinstance(val, str):
+            pat = cfg.get("pattern")
+            if pat and isinstance(val, str):
                 if not re.match(pat, val):
                     out.append(f"Field '{field}' does not match required format")
 
             # custom validator
-            if callable(cfg.get("validator")):
-                ok, msg = cfg["validator"](val)  # type: ignore[arg-type]
+            validator = cfg.get("validator")
+            if callable(validator):
+                ok, msg = validator(val)  # type: ignore[arg-type]
                 if not ok:
                     out.append(f"Field '{field}': {msg}")
 
@@ -231,7 +234,12 @@ class BaseService:
         """
         Execute arbitrary business‑rule functions.
 
-        rules = [{"name": "Check stock", "function": lambda p: (True, "")}, …]
+        Example
+        -------
+        rules = [
+            {"name": "Check stock", "function": lambda p: (True, "")},
+            ...
+        ]
         """
         errs: List[str] = []
         for rule in rules:
@@ -257,7 +265,6 @@ class BaseService:
         """Run *op_fn* with hooks, metrics, logging and standard error handling."""
         start = datetime.utcnow()
         self._fire_hooks(f"before_{op_name}", *args, **kwargs)
-
         try:
             result = op_fn(*args, **kwargs)
             self._fire_hooks(f"after_{op_name}", result, *args, **kwargs)
@@ -282,12 +289,10 @@ class BaseService:
     ):
         if self.repository is None:
             raise ValueError("Repository not configured")
-
         key = f"paginate:{page}:{per_page}:{tuple(sorted(filters.items()))}"
         cached = self._cache_get(key)
         if cached is not None:
             return cached
-
         result = self.repository.paginate(page=page, per_page=per_page, **filters)
         self._cache_set(key, result, timeout=60)
         return result
@@ -300,7 +305,6 @@ class BaseService:
         op_fn: Callable[[Dict[str, Any]], Any],
     ) -> Dict[str, Any]:
         successes, errors = [], []
-
         for idx, item in enumerate(items):
             try:
                 successes.append(op_fn(item))
@@ -313,6 +317,7 @@ class BaseService:
                 errors=errors,
                 data={"successful_items": successes},
             )
+
         return self.ok(
             f"Bulk {op_name} completed",
             data=successes,
