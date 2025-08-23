@@ -20,6 +20,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship, column_property
 
+from app.models.mine import Mine
+
 class Product(BaseModel):
     """
     Product Model
@@ -151,5 +153,6 @@ Mine.products_count = column_property(
     .correlate_except(Product)
     .scalar_subquery()
 )
+
 
 
