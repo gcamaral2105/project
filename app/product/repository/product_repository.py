@@ -1,183 +1,107 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Optional
 
-from sqlalchemy import asc, desc, func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import asc, desc, or_, select
 from sqlalchemy.orm import Session
 
-from app.lib.repository.base import BaseRepository
-from app.lib.repository.mixins import FilterableRepositoryMixin
-from app.models.product import Product, Mine  # Mine lives in product.py in your repo
+from app.extensions import db
+from app.models.product import Product
 
 
-class SQLAlchemyProductRepository(BaseRepository[Product], FilterableRepositoryMixin):
-    """Repository for Product with helpers to manage a mine's product set."""
+@dataclass
+class Page:
+    items: list
+    total: int
+    page: int
+    per_page: int
+    pages: int
 
-    model = Product
 
-    def __init__(self, session: Session) -> None:
-        super().__init__(session=session)
+class ProductRepository:
+    def __init__(self, session: Optional[Session] = None) -> None:
+        self.session = session or db.session
 
-    # ---------------------------- basic getters ---------------------------- #
-    def get_by_id_and_mine(self, product_id: int, mine_id: int) -> Optional[Product]:
-        q = select(Product).where(Product.id == product_id, Product.mine_id == mine_id, Product.deleted_at.is_(None))
-        return self.session.execute(q).scalars().first()
-
-    def get_by_code_and_mine(self, code: str, mine_id: int, *, include_deleted: bool = False) -> Optional[Product]:
-        conds = [Product.code == code, Product.mine_id == mine_id]
+    # ------------------- read -------------------
+    def _base(self, include_deleted: bool = False, q: str | None = None) -> Any:
+        stmt = select(Product)
         if not include_deleted:
-            conds.append(Product.deleted_at.is_(None))
-        q = select(Product).where(*conds)
-        return self.session.execute(q).scalars().first()
+            stmt = stmt.where(Product.deleted_at.is_(None))
+        if q:
+            pattern = f"%{q.strip()}%"
+            stmt = stmt.where(
+                or_(Product.name.ilike(pattern), Product.code.ilike(pattern))
+            )
+        return stmt
 
-    # ---------------------------- pagination/list -------------------------- #
     def paginate(
         self,
+        *,
         page: int = 1,
         per_page: int = 20,
-        *,
-        mine_id: Optional[int] = None,
-        name: Optional[str] = None,
-        code: Optional[str] = None,
-        q: Optional[str] = None,
-        sort_by: str = "id",
-        sort_dir: str = "asc",
         include_deleted: bool = False,
-    ) -> Dict[str, Any]:
-        query = select(Product)
-        if mine_id is not None:
-            query = query.where(Product.mine_id == mine_id)
-        if name:
-            query = query.where(Product.name.ilike(f"%{name}%"))
-        if code:
-            query = query.where(Product.code.ilike(f"%{code}%"))
-        if q:
-            query = query.where(or_(Product.name.ilike(f"%{q}%"), Product.code.ilike(f"%{q}%")))
-        if not include_deleted:
-            query = query.where(Product.deleted_at.is_(None))
+        q: str | None = None,
+        sort_by: str = "id",
+        sort_direction: str = "asc",
+    ) -> Page:
+        stmt = self._base(include_deleted=include_deleted, q=q)
+        col = getattr(Product, sort_by, Product.id)
+        direction = asc if (sort_direction or "asc").lower() == "asc" else desc
+        stmt = stmt.order_by(direction(col))
 
-        sort_col = getattr(Product, sort_by, Product.id)
-        order_by = asc(sort_col) if sort_dir.lower() != "desc" else desc(sort_col)
-        query = query.order_by(order_by)
+        total = self.session.execute(stmt.with_only_columns(Product.id)).scalars().unique().count()
+        page = max(1, int(page or 1))
+        per_page = max(1, int(per_page or 20))
+        offset = (page - 1) * per_page
+        items = self.session.execute(stmt.offset(offset).limit(per_page)).scalars().all()
+        pages = (total + per_page - 1) // per_page if per_page else 1
+        return Page(items=items, total=total, page=page, per_page=per_page, pages=pages)
 
-        return self._paginate_query(query, page=page, per_page=per_page)
+    def get(self, product_id: int) -> Optional[Product]:
+        stmt = select(Product).where(Product.id == product_id)
+        return self.session.execute(stmt).scalars().first()
 
-    # ----------------------- creation / updates (single) -------------------- #
-    def create_for_mine(self, mine: Mine, data: Dict[str, Any]) -> Product:
-        obj = Product(
-            mine_id=mine.id,
-            name=data.get("name"),
-            code=data.get("code"),
-            description=data.get("description"),
+    # ------------------- write -------------------
+    def create(self, payload: Dict[str, Any]) -> Product:
+        entity = Product(
+            name=(payload.get("name") or "").strip(),
+            code=(payload.get("code") or None),
+            category=payload.get("category"),
+            subtype=payload.get("subtype"),
+            mine_id=payload.get("mine_id"),
+            unit=payload.get("unit"),
+            is_active=payload.get("is_active", True),
         )
-        self.session.add(obj)
-        self.session.flush()  # PK available; integrity checked later by service/transaction
-        return obj
-
-    def update_fields(self, product: Product, data: Dict[str, Any]) -> Product:
-        for f in ["name", "code", "description"]:
-            if f in data:
-                setattr(product, f, data[f])
+        self.session.add(entity)
         self.session.flush()
-        return product
+        return entity
 
-    # ----------------------- bulk helpers for one mine ---------------------- #
-    def upsert_many_for_mine(
-        self,
-        mine: Mine,
-        items: List[Dict[str, Any]],
-        *,
-        match_by: Tuple[str, ...] = ("id", "code"),
-        delete_missing: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Synchronize the product set of a mine with `items`.
-
-        Each item may contain:
-          - id (int) OR code (str) to match existing products
-          - name, description
-          - _action="delete" to force deletion of that specific item
-
-        Behavior:
-          1) If _action == "delete": soft-delete (if found)
-          2) Else match on ('id' -> first, then 'code' if provided)
-             - if found: update fields
-             - if not found: create new
-          3) If delete_missing=True: any existing product not matched by the
-             incoming set is soft-deleted.
-
-        Returns dict with lists of: created, updated, deleted, unchanged (ids).
-        """
-        created, updated, deleted, unchanged = [], [], [], []
-
-        # Preload all existing (including deleted if we want to "restore")
-        existing_q = select(Product).where(Product.mine_id == mine.id)
-        existing = {p.id: p for p in self.session.execute(existing_q).scalars().all()}
-        matched_ids: set[int] = set()
-
-        # Fast index by code for matching
-        code_index: Dict[str, Product] = {}
-        for p in existing.values():
-            if p.code:
-                code_index[p.code] = p
-
-        # Process incoming items
-        for raw in items:
-            action = (raw.get("_action") or "").lower().strip()
-            pid = raw.get("id")
-            code = raw.get("code")
-
-            # Match product
-            product: Optional[Product] = None
-            if pid is not None and pid in existing:
-                product = existing[pid]
-            elif code:
-                product = code_index.get(code)
-
-            if action == "delete":
-                if product and product.deleted_at is None:
-                    self.soft_delete(product)
-                    deleted.append(product.id)
-                    matched_ids.add(product.id)
-                # if not found or already deleted -> ignore quietly
-                continue
-
-            if product is None:
-                # create
-                product = self.create_for_mine(mine, raw)
-                created.append(product.id)
-                matched_ids.add(product.id)
-                continue
-
-            # If found and not asked to delete -> maybe update
-            before = (product.name, product.code, product.description)
-            self.update_fields(product, raw)
-            after = (product.name, product.code, product.description)
-
-            if before == after:
-                unchanged.append(product.id)
-            else:
-                updated.append(product.id)
-            matched_ids.add(product.id)
-
-        if delete_missing:
-            # Soft-delete everything not matched in this sync
-            for pid, prod in existing.items():
-                if pid not in matched_ids and prod.deleted_at is None:
-                    self.soft_delete(prod)
-                    deleted.append(pid)
-
-        return {
-            "created": created,
-            "updated": updated,
-            "deleted": deleted,
-            "unchanged": unchanged,
-        }
-
-    def create_products_for_mine(self, mine: Mine, items: Iterable[Dict[str, Any]]) -> List[Product]:
-        objs: List[Product] = []
-        for data in items:
-            objs.append(self.create_for_mine(mine, data))
+    def update_fields(self, product_id: int, payload: Dict[str, Any]) -> Product:
+        entity = self.get(product_id)
+        if not entity:
+            raise ValueError("Product not found")
+        for field in ["name", "code", "category", "subtype", "mine_id", "unit", "is_active"]:
+            if field in payload:
+                setattr(entity, field, payload[field])
         self.session.flush()
-        return objs
+        return entity
+
+    def delete(self, product_id: int, soft: bool = True) -> None:
+        entity = self.get(product_id)
+        if not entity:
+            return
+        if soft:
+            entity.deleted_at = datetime.utcnow()
+            self.session.flush()
+        else:
+            self.session.delete(entity)
+            self.session.flush()
+
+    def restore(self, product_id: int) -> None:
+        entity = self.get(product_id)
+        if not entity:
+            return
+        entity.deleted_at = None
+        self.session.flush()
