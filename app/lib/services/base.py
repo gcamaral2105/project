@@ -9,9 +9,8 @@ Adds high-level features on top of a plain repository:
 * event / hook system
 * structured logging
 
-The service expects *optionally* a repository with methods such as
-``paginate`` or any custom functions you will call through
-``safe_repository_operation``.
+Use `safe_repository_operation` to wrap repository calls with hooks, metrics,
+and uniform error envelopes.
 """
 from __future__ import annotations
 
@@ -254,6 +253,31 @@ class BaseService:
                     errs.append(f"{name}: {exc}")
         return errs
 
+    # NEW: single entrypoint to run all validations
+    def run_validations(
+        self,
+        payload: Dict[str, Any],
+        required: List[str] | None = None,
+        constraints: Dict[str, Dict[str, Any]] | None = None,
+        business_rules: List[Dict[str, Any]] | None = None,
+    ) -> List[str]:
+        errors: List[str] = []
+        if required:
+            errors += self.validate_required(payload, required)
+        if constraints:
+            errors += self.validate_constraints(payload, constraints)
+        if business_rules:
+            errors += self.validate_business_rules(payload, business_rules)
+        return errors
+
+    # NEW: centralized exception → error envelope mapping
+    def map_exception(self, exc: Exception, op_name: str) -> Dict[str, Any]:
+        return self.error(
+            f"Failed to {op_name}",
+            errors=[str(exc)],
+            error_code=f"{op_name.upper()}_ERROR",
+        )
+
     # ─────────────────────────── repository wrapper ────────────────────────── #
     def safe_repository_operation(
         self,
@@ -274,11 +298,7 @@ class BaseService:
             self._fire_hooks("on_error", exc, op_name, *args, **kwargs)
             self._record_operation(op_name, start, False)
             self.logger.error("%s failed: %s", op_name, exc)
-            return self.error(
-                f"Failed to {op_name}",
-                errors=[str(exc)],
-                error_code=f"{op_name.upper()}_ERROR",
-            )
+            return self.map_exception(exc, op_name)
 
     # ───────────────────────────── pagination ─────────────────────────────── #
     def paginate(
@@ -383,3 +403,5 @@ class BaseService:
     @staticmethod
     def format_validation_errors(errs: List[str]) -> str:
         return "; ".join(errs)
+
+
