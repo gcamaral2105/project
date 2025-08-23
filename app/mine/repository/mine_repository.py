@@ -1,65 +1,92 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, or_
+from typing import Any, Dict, Iterable, List, Optional
 
-from app.models.production import Production
+from sqlalchemy import asc, desc, or_, select
+from sqlalchemy.orm import Session
+
 from app.lib.repository.base import BaseRepository
+from app.lib.repository.mixins import FilterableRepositoryMixin
+from app.models.product import Mine  # In your project, Mine is declared in product.py
+from app.product.repository.product_repository import SQLAlchemyProductRepository
 
 
-class MineRepository(BaseRepository[Production]):
-    """
-    Repository de Production (domínio Mine) baseado em BaseRepository.
-    """
+class SQLAlchemyMineRepository(BaseRepository[Mine], FilterableRepositoryMixin):
+    """Repository for Mine + helpers to manage products in one transaction."""
 
-    ENABLE_SOFT_DELETE: bool = True  # respeita deleted_at em Production/BaseModel
+    model = Mine
 
-    def __init__(self) -> None:
-        super().__init__(Production)
+    def __init__(self, session: Session) -> None:
+        super().__init__(session=session)
+        self.product_repo = SQLAlchemyProductRepository(session)
 
-    def find_by_criteria(self, criteria: Dict[str, Any]) -> List[Production]:
-        return super().find_by_multiple_criteria(criteria, operator="AND")
-
-    def search_paginated(
+    # ---------------------------- pagination/list --------------------------- #
+    def paginate(
         self,
-        q: Optional[str] = None,
         page: int = 1,
         per_page: int = 20,
-        period_start: Optional[str] = None,
-        period_end: Optional[str] = None,
-        status: Optional[str] = None,
-        order_desc: bool = True,
-    ) -> Tuple[List[Production], int]:
-        """
-        Lista produções com filtros de janela temporal e status.
-        Respeita soft-delete.
-        """
-        query = Production.query
-        if hasattr(Production, "deleted_at"):
-            query = query.filter(Production.deleted_at.is_(None))
-
+        *,
+        name: str | None = None,
+        code: str | None = None,
+        country: str | None = None,
+        q: str | None = None,
+        sort_by: str = "id",
+        sort_dir: str = "asc",
+        include_deleted: bool = False,
+    ) -> Dict[str, Any]:
+        query = select(Mine)
+        if name:
+            query = query.where(Mine.name.ilike(f"%{name}%"))
+        if code:
+            query = query.where(Mine.code.ilike(f"%{code}%"))
+        if country:
+            query = query.where(Mine.country.ilike(f"%{country}%"))
         if q:
-            like = f"%{q.strip()}%"
-            conds = []
-            if hasattr(Production, "scenario_name"):
-                conds.append(Production.scenario_name.ilike(like))
-            if hasattr(Production, "scenario_description"):
-                conds.append(Production.scenario_description.ilike(like))
-            if conds:
-                query = query.filter(or_(*conds))
+            query = query.where(
+                or_(
+                    Mine.name.ilike(f"%{q}%"),
+                    Mine.code.ilike(f"%{q}%"),
+                    Mine.country.ilike(f"%{q}%"),
+                )
+            )
+        if not include_deleted:
+            query = query.where(Mine.deleted_at.is_(None))
 
-        if period_start and hasattr(Production, "start_date_contractual_year"):
-            query = query.filter(Production.start_date_contractual_year >= period_start)
-        if period_end and hasattr(Production, "end_date_contractual_year"):
-            query = query.filter(Production.end_date_contractual_year <= period_end)
+        sort_col = getattr(Mine, sort_by, Mine.id)
+        order_by = asc(sort_col) if sort_dir.lower() != "desc" else desc(sort_col)
+        query = query.order_by(order_by)
 
-        if status and hasattr(Production, "status"):
-            query = query.filter(func.lower(Production.status) == func.lower(status))
+        return self._paginate_query(query, page=page, per_page=per_page)
 
-        # ordenação por data de início quando disponível
-        order_col = getattr(Production, "start_date_contractual_year", Production.id)
-        query = query.order_by(order_col.desc() if order_desc else order_col.asc())
+    # ---------------------------- nested helpers ---------------------------- #
+    def create_with_products(self, mine_data: Dict[str, Any], products: Iterable[Dict[str, Any]] | None = None) -> Mine:
+        mine = Mine(
+            name=mine_data.get("name"),
+            code=mine_data.get("code"),
+            country=mine_data.get("country"),
+            description=mine_data.get("description"),
+        )
+        self.session.add(mine)
+        self.session.flush()  # get mine.id
 
-        total = query.count()
-        items = query.offset((page - 1) * per_page).limit(per_page).all()
-        return items, total
+        if products:
+            self.product_repo.create_products_for_mine(mine, products)
+
+        return mine
+
+    def sync_products_for_mine(
+        self,
+        mine: Mine,
+        items: List[Dict[str, Any]],
+        *,
+        delete_missing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Delegate to product repo to upsert/soft-delete products for a mine.
+        """
+        return self.product_repo.upsert_many_for_mine(
+            mine,
+            items,
+            match_by=("id", "code"),
+            delete_missing=delete_missing,
+        )
