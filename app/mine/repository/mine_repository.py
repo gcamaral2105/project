@@ -1,92 +1,144 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Optional, Sequence
 
 from sqlalchemy import asc, desc, or_, select
 from sqlalchemy.orm import Session
 
-from app.lib.repository.base import BaseRepository
-from app.lib.repository.mixins import FilterableRepositoryMixin
-from app.models.product import Mine  # In your project, Mine is declared in product.py
-from app.product.repository.product_repository import SQLAlchemyProductRepository
+from app.extensions import db
+from app.models.mine import Mine
 
 
-class SQLAlchemyMineRepository(BaseRepository[Mine], FilterableRepositoryMixin):
-    """Repository for Mine + helpers to manage products in one transaction."""
+@dataclass
+class Page:
+    items: list
+    total: int
+    page: int
+    per_page: int
+    pages: int
 
-    model = Mine
 
-    def __init__(self, session: Session) -> None:
-        super().__init__(session=session)
-        self.product_repo = SQLAlchemyProductRepository(session)
+@dataclass
+class MineFilter:
+    country: Optional[str] = None
+    q: Optional[str] = None
+    include_deleted: bool = False
 
-    # ---------------------------- pagination/list --------------------------- #
-    def paginate(
+
+@dataclass
+class MineSort:
+    field: str = "id"
+    direction: str = "asc"
+
+
+class SQLAlchemyMineRepository:
+    """
+    Simple repository specializing on Mine with soft-delete support.
+    """
+
+    def __init__(self, session: Optional[Session] = None) -> None:
+        self.session = session or db.session
+
+    # ------------------- queries -------------------
+    def _base_query(self, flt: MineFilter | None) -> Any:
+        stmt = select(Mine)
+        if not flt or not flt.include_deleted:
+            stmt = stmt.where(Mine.deleted_at.is_(None))
+
+        if flt:
+            if flt.country:
+                stmt = stmt.where(Mine.country == flt.country)
+            if flt.q:
+                pattern = f"%{flt.q.strip()}%"
+                stmt = stmt.where(
+                    or_(Mine.name.ilike(pattern), Mine.city.ilike(pattern), Mine.country.ilike(pattern))
+                )
+        return stmt
+
+    def _apply_sort(self, stmt: Any, sort: MineSort | None) -> Any:
+        sort = sort or MineSort()
+        col = getattr(Mine, sort.field, Mine.id)
+        direction = asc if (sort.direction or "asc").lower() == "asc" else desc
+        return stmt.order_by(direction(col))
+
+    def list(
         self,
+        flt: MineFilter | None = None,
+        sort: MineSort | None = None,
         page: int = 1,
         per_page: int = 20,
-        *,
-        name: str | None = None,
-        code: str | None = None,
-        country: str | None = None,
-        q: str | None = None,
-        sort_by: str = "id",
-        sort_dir: str = "asc",
-        include_deleted: bool = False,
-    ) -> Dict[str, Any]:
-        query = select(Mine)
-        if name:
-            query = query.where(Mine.name.ilike(f"%{name}%"))
-        if code:
-            query = query.where(Mine.code.ilike(f"%{code}%"))
-        if country:
-            query = query.where(Mine.country.ilike(f"%{country}%"))
-        if q:
-            query = query.where(
-                or_(
-                    Mine.name.ilike(f"%{q}%"),
-                    Mine.code.ilike(f"%{q}%"),
-                    Mine.country.ilike(f"%{q}%"),
-                )
-            )
-        if not include_deleted:
-            query = query.where(Mine.deleted_at.is_(None))
+        with_products: bool = False,  # kept for API symmetry, not used here
+    ) -> Page:
+        stmt = self._apply_sort(self._base_query(flt), sort)
+        total = self.session.execute(stmt.with_only_columns(Mine.id)).scalars().unique().count()
+        if page < 1:
+            page = 1
+        if per_page < 1:
+            per_page = 20
+        offset = (page - 1) * per_page
+        items = self.session.execute(stmt.offset(offset).limit(per_page)).scalars().all()
+        pages = (total + per_page - 1) // per_page if per_page else 1
+        return Page(items=items, total=total, page=page, per_page=per_page, pages=pages)
 
-        sort_col = getattr(Mine, sort_by, Mine.id)
-        order_by = asc(sort_col) if sort_dir.lower() != "desc" else desc(sort_col)
-        query = query.order_by(order_by)
+    def get(self, mine_id: int, with_products: bool = False) -> Optional[Mine]:
+        stmt = select(Mine).where(Mine.id == mine_id)
+        return self.session.execute(stmt).scalars().first()
 
-        return self._paginate_query(query, page=page, per_page=per_page)
-
-    # ---------------------------- nested helpers ---------------------------- #
-    def create_with_products(self, mine_data: Dict[str, Any], products: Iterable[Dict[str, Any]] | None = None) -> Mine:
-        mine = Mine(
-            name=mine_data.get("name"),
-            code=mine_data.get("code"),
-            country=mine_data.get("country"),
-            description=mine_data.get("description"),
+    # ------------------- mutations -------------------
+    def create(self, payload: Dict[str, Any]) -> Mine:
+        entity = Mine(
+            name=(payload.get("name") or "").strip(),
+            code=(payload.get("code") or None),
+            country=payload.get("country"),
+            state=payload.get("state"),
+            city=payload.get("city"),
+            latitude=payload.get("latitude"),
+            longitude=payload.get("longitude"),
+            berths=payload.get("berths", 1),
+            shiploaders=payload.get("shiploaders", 1),
+            is_active=payload.get("is_active", True),
         )
-        self.session.add(mine)
-        self.session.flush()  # get mine.id
+        self.session.add(entity)
+        self.session.flush()  # assign PK
+        return entity
 
-        if products:
-            self.product_repo.create_products_for_mine(mine, products)
+    def update_fields(self, mine_id: int, payload: Dict[str, Any]) -> Mine:
+        entity = self.get(mine_id)
+        if not entity:
+            raise ValueError("Mine not found")
+        for field in [
+            "name",
+            "code",
+            "country",
+            "state",
+            "city",
+            "latitude",
+            "longitude",
+            "berths",
+            "shiploaders",
+            "is_active",
+        ]:
+            if field in payload:
+                setattr(entity, field, payload[field])
+        self.session.flush()
+        return entity
 
-        return mine
+    def delete(self, mine_id: int, soft: bool = True) -> None:
+        entity = self.get(mine_id)
+        if not entity:
+            return
+        if soft:
+            entity.deleted_at = datetime.utcnow()
+            self.session.flush()
+        else:
+            self.session.delete(entity)
+            self.session.flush()
 
-    def sync_products_for_mine(
-        self,
-        mine: Mine,
-        items: List[Dict[str, Any]],
-        *,
-        delete_missing: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Delegate to product repo to upsert/soft-delete products for a mine.
-        """
-        return self.product_repo.upsert_many_for_mine(
-            mine,
-            items,
-            match_by=("id", "code"),
-            delete_missing=delete_missing,
-        )
+    def restore(self, mine_id: int) -> None:
+        entity = self.get(mine_id)
+        if not entity:
+            return
+        entity.deleted_at = None
+        self.session.flush()
