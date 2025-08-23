@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any, Dict
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 
 from app.extensions import db, migrate
+from app.auth.routes.auth_routes import auth_bp
+from app.auth.utils.jwt import decode_jwt, get_bearer_token
 from app.product.routes.product_routes import product_bp
 from app.mine.routes.mine_routes import mine_bp
 
@@ -33,9 +36,39 @@ def create_app(config_object: str | None = None) -> Flask:
         app.logger.addHandler(handler)
 
     # ---- blueprints ----
-    app.register_blueprint(product_bp)
-    app.register_blueprint(mine_bp)
-    # TODO: register other BPs when available (auth, production, partner, etc.)
+    app.register_blueprint(auth_bp)     # /api/auth/*
+    app.register_blueprint(product_bp)  # /api/products/*
+    app.register_blueprint(mine_bp)     # /api/mines/*
+
+    # ---- JWT guard for /api/* except /api/auth/* ----
+    @app.before_request
+    def _jwt_guard():
+        # Preflight
+        if request.method == "OPTIONS":
+            return None
+
+        path = request.path or ""
+        if not path.startswith("/api/"):
+            return None
+        if path.startswith("/api/auth/"):
+            return None  # login etc.
+
+        token = get_bearer_token(request.headers.get("Authorization"))
+        if not token:
+            return jsonify({"success": False, "message": "Missing Bearer token"}), 401
+
+        try:
+            claims = decode_jwt(
+                token,
+                secret=app.config["JWT_SECRET_KEY"],
+                algorithms=[app.config.get("JWT_ALGORITHM", "HS256")],
+            )
+            # Make claims available to handlers
+            g.jwt = claims
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"success": False, "message": "Invalid or expired token", "errors": [str(exc)]}), 401
+
+        return None
 
     # ---- error handlers (JSON) ----
     @app.errorhandler(400)
@@ -55,6 +88,3 @@ def create_app(config_object: str | None = None) -> Flask:
         return jsonify({"success": False, "message": "Internal server error", "errors": [str(err)]}), 500
 
     return app
-
-
-
