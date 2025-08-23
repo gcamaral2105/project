@@ -1,76 +1,138 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple
 
-from app.mine.repository.mine_repository import MineRepository
-from app.lib.repository.decorators import transactional  # @transactional
+from typing import Any, Dict, List, Optional
+
+from app.extensions import db
+from app.lib.services.base import BaseService
+from app.lib.repository.decorators import transactional
+from app.mine.repository.mine_repository import SQLAlchemyMineRepository
 
 
-class MineService:
+class MineService(BaseService):
     """
-    Regras de negócio para cenários de Production (domínio Mine).
-    - Métodos de escrita usam @transactional.
+    Service layer for Mine. Uses BaseService helpers:
+    - run_validations(...)
+    - safe_repository_operation(...)
+    - ok/error/validation_error envelopes
+    - @transactional for one-commit-per-call policy
     """
 
-    def __init__(self) -> None:
-        self.repo = MineRepository()
+    def __init__(self, repository: Optional[SQLAlchemyMineRepository] = None) -> None:
+        super().__init__(repository or SQLAlchemyMineRepository(db.session))
 
-    # --------------------- Leituras --------------------- #
-    def get(self, production_id: int):
-        return self.repo.get_by_id(production_id)
+    # ------------ queries ------------
+    def list_mines(self, page: int = 1, per_page: int = 20, **filters):
+        # keep cache-friendly paginate from BaseService
+        return self.paginate(page=page, per_page=per_page, **filters)
 
-    def list(
-        self,
-        q: Optional[str],
-        page: int,
-        per_page: int,
-        period_start: Optional[str],
-        period_end: Optional[str],
-        status: Optional[str],
-        order_desc: bool,
-    ) -> Tuple[list, int]:
-        return self.repo.search_paginated(
-            q=q,
-            page=page,
-            per_page=per_page,
-            period_start=period_start,
-            period_end=period_end,
-            status=status,
-            order_desc=order_desc,
-        )
+    def get_mine(self, mine_id: int):
+        def _op():
+            return self.repository.get_by_id(mine_id)
+        result = self.safe_repository_operation("read", _op)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+        if result is None:
+            return self.error("Mine not found", error_code="NOT_FOUND")
+        return self.ok("Mine retrieved", data=result.to_dict(deep=False))
 
-    def list_active(self) -> list:
-        return self.repo.get_active()
-
-    def list_deleted(self) -> list:
-        return self.repo.get_deleted()
-
-    # --------------------- Escritas (transacionais) --------------------- #
+    # ------------ create ------------
     @transactional
-    def create(self, payload: Dict[str, Any]):
-        # Validações mínimas — ajuste conforme seu model Production
-        name = (payload.get("scenario_name") or "").strip()
-        if not name:
-            raise ValueError("scenario_name is required")
-        contractual_year = payload.get("contractual_year")
-        if contractual_year is None:
-            raise ValueError("contractual_year is required")
-        return self.repo.create(**payload)
+    def create_mine(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Expected payload at minimum:
+        { "name": str, "code": str, "country": str, ... }
 
-    @transactional
-    def update(self, production_id: int, payload: Dict[str, Any]):
-        updated = self.repo.update(production_id, **payload)
-        if not updated:
-            raise LookupError("Production not found")
-        return updated
+        Optionally, you may pass "products": [{name, code?, description?}, ...]
+        to create products in a single transaction (if your repo supports it).
+        """
+        required = ["name", "code", "country"]
+        constraints = {
+            "name": {"type": str, "min_length": 2, "max_length": 120},
+            "code": {"type": str, "min_length": 1, "max_length": 50},
+            "country": {"type": str, "min_length": 2, "max_length": 100},
+        }
+        errors = self.run_validations(payload, required=required, constraints=constraints)
+        if errors:
+            return self.validation_error(errors)
 
-    @transactional
-    def delete(self, production_id: int) -> None:
-        ok = self.repo.delete(production_id)  # soft-delete
-        if not ok:
-            raise LookupError("Production not found")
+        clean = {
+            "name": self.sanitize(payload.get("name")),
+            "code": self.sanitize(payload.get("code")),
+            "country": self.sanitize(payload.get("country")),
+            "description": self.sanitize(payload.get("description")),
+        }
+        products = payload.get("products") or []
 
+        def _op():
+            # If your repository already provides a convenience method to create
+            # a mine and its products, you can call it here. Otherwise, create
+            # the mine, then add products and flush.
+            mine = self.repository.create(clean)
+            # Optionally handle nested product creation (if desired)
+            if products and hasattr(self.repository, "create_products_for_mine"):
+                self.repository.create_products_for_mine(mine, products)
+            db.session.flush()
+            return mine
+
+        result = self.safe_repository_operation("create", _op)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+        return self.ok("Mine created", data=result.to_dict(deep=False))
+
+    # ------------ update ------------
     @transactional
-    def restore(self, production_id: int) -> None:
-        ok = self.repo.restore(production_id)
-        if not ok:
-            raise LookupError("Production not found or not deleted")
+    def update_mine(self, mine_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        constraints = {
+            "name": {"type": str, "min_length": 2, "max_length": 120},
+            "code": {"type": str, "min_length": 1, "max_length": 50},
+            "country": {"type": str, "min_length": 2, "max_length": 100},
+        }
+        errors = self.run_validations(payload, constraints=constraints)
+        if errors:
+            return self.validation_error(errors)
+
+        def _op():
+            mine = self.repository.get_by_id(mine_id)
+            if mine is None:
+                raise ValueError("Mine not found")
+            for f in ["name", "code", "country", "description"]:
+                if f in payload:
+                    setattr(mine, f, self.sanitize(payload[f]))
+            db.session.flush()
+            return mine
+
+        result = self.safe_repository_operation("update", _op)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+        return self.ok("Mine updated", data=result.to_dict(deep=False))
+
+    # ------------ delete (soft) ------------
+    @transactional
+    def delete_mine(self, mine_id: int) -> Dict[str, Any]:
+        def _op():
+            mine = self.repository.get_by_id(mine_id)
+            if mine is None:
+                raise ValueError("Mine not found")
+            self.repository.soft_delete(mine)
+            return True
+
+        result = self.safe_repository_operation("delete", _op)
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+        return self.ok("Mine deleted", data={"id": mine_id})
+
+    # ------------ restore ------------
+    @transactional
+    def restore_mine(self, mine_id: int) -> Dict[str, Any]:
+        def _op():
+            mine = self.repository.get_by_id(mine_id, include_deleted=True)
+            if mine is None:
+                raise ValueError("Mine not found")
+            self.repository.restore(mine)
+            return mine
+
+        result = self.safe_repository_operation("create", _op)  # treat restore as create-ish
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+        return self.ok("Mine restored", data=result.to_dict(deep=False))
+
