@@ -1,172 +1,52 @@
+# app/mine/services/mine_service.py
 from __future__ import annotations
-
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, Optional
+from sqlalchemy.orm import Session
 from app.extensions import db
-from app.lib.services.base import BaseService
+from app.mine.repository.mine_repository import SQLAlchemyMineRepository, MineFilter, MineSort
 from app.lib.repository.decorators import transactional
-from app.mine.repository.mine_repository import SQLAlchemyMineRepository
 
+class MineService:
+    def __init__(self, session: Optional[Session] = None) -> None:
+        self.session = session or db.session
+        self.repo = SQLAlchemyMineRepository(self.session)
 
-class MineService(BaseService):
-    """
-    Mine service with nested products support:
-    - create_mine(..., products=[...])
-    - update_mine(..., products=[...], delete_missing_products=bool)
-    """
+    def list_mines(self, *, page:int=1, per_page:int=20, country:Optional[str]=None,
+                   search_query:Optional[str]=None, include_deleted:bool=False,
+                   sort_by:str="id", sort_direction:str="asc", include_products:bool=False) -> Dict[str, Any]:
+        flt = MineFilter(country=country, q=search_query, include_deleted=include_deleted)
+        sort = MineSort(field=sort_by, direction=sort_direction)
+        page_obj = self.repo.list(flt, sort=sort, page=page, per_page=per_page, with_products=include_products)
+        return {
+            "success": True,
+            "message": "OK",
+            "data": [m.to_dict(include_products=include_products) for m in page_obj.items],
+            "metadata": {"total": page_obj.total, "page": page_obj.page, "per_page": page_obj.per_page, "pages": page_obj.pages},
+            "errors": [],
+        }
 
-    def __init__(self, repository: Optional[SQLAlchemyMineRepository] = None) -> None:
-        super().__init__(repository or SQLAlchemyMineRepository(db.session))
+    def get_mine(self, mine_id:int, *, include_products:bool=False) -> Dict[str, Any]:
+        mine = self.repo.get(mine_id, with_products=include_products)
+        if not mine:
+            return {"success": False, "message": "Mine not found", "errors": [], "data": None}
+        return {"success": True, "message": "OK", "data": mine.to_dict(include_products=include_products), "errors": []}
 
-    # ------------ queries ------------
-    def list_mines(self, page: int = 1, per_page: int = 20, **filters):
-        return self.paginate(page=page, per_page=per_page, **filters)
-
-    def get_mine(self, mine_id: int):
-        def _op():
-            return self.repository.get_by_id(mine_id)
-        result = self.safe_repository_operation("read", _op)
-        if isinstance(result, dict) and result.get("success") is False:
-            return result
-        if result is None:
-            return self.error("Mine not found", error_code="NOT_FOUND")
-        return self.ok("Mine retrieved", data=result.to_dict(deep=False))
-
-    # ------------ create ------------
     @transactional
     def create_mine(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        required = ["name", "code", "country"]
-        constraints = {
-            "name": {"type": str, "min_length": 2, "max_length": 120},
-            "code": {"type": str, "min_length": 1, "max_length": 50},
-            "country": {"type": str, "min_length": 2, "max_length": 100},
-        }
-        errors = self.run_validations(payload, required=required, constraints=constraints)
-        if errors:
-            return self.validation_error(errors)
-
-        mine_data = {
-            "name": self.sanitize(payload.get("name")),
-            "code": self.sanitize(payload.get("code")),
-            "country": self.sanitize(payload.get("country")),
-            "description": self.sanitize(payload.get("description")),
-        }
-
-        raw_products = payload.get("products") or []
-        products: List[Dict[str, Any]] = []
-        for p in raw_products:
-            # Accept minimal set for create
-            pname = self.sanitize(p.get("name"))
-            if not pname:
-                continue  # ignore invalid product rows silently; you can collect errors if you prefer
-            products.append(
-                {
-                    "name": pname,
-                    "code": self.sanitize(p.get("code")),
-                    "description": self.sanitize(p.get("description")),
-                }
-            )
-
-        def _op():
-            return self.repository.create_with_products(mine_data, products or None)
-
-        result = self.safe_repository_operation("create", _op)
-        if isinstance(result, dict) and result.get("success") is False:
-            return result
-        return self.ok("Mine created", data=result.to_dict(deep=True))
-
-    # ------------ update + product sync ------------
-    @transactional
-    def update_mine(self, mine_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-        constraints = {
-            "name": {"type": str, "min_length": 2, "max_length": 120},
-            "code": {"type": str, "min_length": 1, "max_length": 50},
-            "country": {"type": str, "min_length": 2, "max_length": 100},
-        }
-        errors = self.run_validations(payload, constraints=constraints)
-        if errors:
-            return self.validation_error(errors)
-
-        delete_missing_products = bool(payload.get("delete_missing_products", False))
-        raw_products = payload.get("products", None)  # if omitted, we don't touch products
-
-        def _op():
-            mine = self.repository.get_by_id(mine_id)
-            if mine is None:
-                raise ValueError("Mine not found")
-
-            # update mine fields
-            for f in ["name", "code", "country", "description"]:
-                if f in payload:
-                    setattr(mine, f, self.sanitize(payload[f]))
-
-            # sync products if requested
-            sync_result = None
-            if isinstance(raw_products, list):
-                normalized: List[Dict[str, Any]] = []
-                for p in raw_products:
-                    item: Dict[str, Any] = {}
-                    if "id" in p:
-                        item["id"] = p["id"]
-                    if "code" in p:
-                        item["code"] = self.sanitize(p.get("code"))
-                    # optional action: "delete"
-                    if "_action" in p:
-                        item["_action"] = str(p.get("_action")).lower().strip()
-                    # updatable fields
-                    for f in ("name", "description"):
-                        if f in p:
-                            item[f] = self.sanitize(p.get(f))
-                    normalized.append(item)
-
-                sync_result = self.repository.sync_products_for_mine(
-                    mine,
-                    normalized,
-                    delete_missing=delete_missing_products,
-                )
-
-            db.session.flush()
-            return mine, sync_result
-
-        result = self.safe_repository_operation("update", _op)
-        if isinstance(result, dict) and result.get("success") is False:
-            return result
-
-        mine, sync = result
-        return self.ok(
-            "Mine updated",
-            data={
-                "mine": mine.to_dict(deep=True),
-                "products_sync": sync,
-            },
-        )
-
-    # ------------ delete / restore ------------
-    @transactional
-    def delete_mine(self, mine_id: int) -> Dict[str, Any]:
-        def _op():
-            mine = self.repository.get_by_id(mine_id)
-            if mine is None:
-                raise ValueError("Mine not found")
-            self.repository.soft_delete(mine)
-            return True
-
-        result = self.safe_repository_operation("delete", _op)
-        if isinstance(result, dict) and result.get("success") is False:
-            return result
-        return self.ok("Mine deleted", data={"id": mine_id})
+        entity = self.repo.create(payload)
+        return {"success": True, "message": "Created", "data": entity.to_dict(), "errors": []}
 
     @transactional
-    def restore_mine(self, mine_id: int) -> Dict[str, Any]:
-        def _op():
-            mine = self.repository.get_by_id(mine_id, include_deleted=True)
-            if mine is None:
-                raise ValueError("Mine not found")
-            self.repository.restore(mine)
-            return mine
+    def update_mine(self, mine_id:int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        entity = self.repo.update_fields(mine_id, payload)
+        return {"success": True, "message": "Updated", "data": entity.to_dict(), "errors": []}
 
-        result = self.safe_repository_operation("create", _op)
-        if isinstance(result, dict) and result.get("success") is False:
-            return result
-        return self.ok("Mine restored", data=result.to_dict(deep=False))
+    @transactional
+    def delete_mine(self, mine_id:int, *, soft:bool=True) -> Dict[str, Any]:
+        self.repo.delete(mine_id, soft=soft)
+        return {"success": True, "message": "Deleted", "data": None, "errors": []}
 
+    @transactional
+    def restore_mine(self, mine_id:int) -> Dict[str, Any]:
+        self.repo.restore(mine_id)
+        return {"success": True, "message": "Restored", "data": None, "errors": []}
