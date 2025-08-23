@@ -11,17 +11,11 @@ mine_bp = Blueprint("mine_bp", __name__, url_prefix="/api/mines")
 service = MineService()
 
 
-# --------------------------- helpers --------------------------- #
 def _response(envelope: Dict[str, Any], *, success_code=HTTPStatus.OK) -> Tuple[Any, int]:
-    """
-    Map BaseService envelopes to proper HTTP status codes.
-    """
     if envelope.get("success"):
         return jsonify(envelope), int(success_code)
-
     code = str(envelope.get("error_code") or "").upper()
     msg = (envelope.get("message") or "").lower()
-
     if code in {"VALIDATION_ERROR"}:
         status = HTTPStatus.BAD_REQUEST
     elif code in {"NOT_FOUND"} or "not found" in msg:
@@ -42,24 +36,19 @@ def _json_body() -> Dict[str, Any]:
     return data
 
 
-# --------------------------- routes --------------------------- #
 @mine_bp.get("")
 def list_mines():
     """
     GET /api/mines
-    Query params:
-      - page, per_page
-      - name, code, country, q (free text)
-      - sort_by, sort_dir, include_deleted
+    Query:
+      page, per_page, name, code, country, q, sort_by, sort_dir, include_deleted
     """
     page = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", 20))
-
     filters: Dict[str, Any] = {}
     for f in ["name", "code", "country", "q", "sort_by", "sort_dir"]:
         if f in request.args:
             filters[f] = request.args[f]
-
     if "include_deleted" in request.args:
         filters["include_deleted"] = request.args.get("include_deleted", "false").lower() in {"1", "true", "yes"}
 
@@ -70,6 +59,9 @@ def list_mines():
 
 @mine_bp.get("/<int:mine_id>")
 def get_mine(mine_id: int):
+    """
+    GET /api/mines/<mine_id>
+    """
     envelope = service.get_mine(mine_id)
     return _response(envelope)
 
@@ -78,9 +70,14 @@ def get_mine(mine_id: int):
 def create_mine():
     """
     POST /api/mines
-    Body (JSON):
-      { "name": str, "code": str, "country": str, "description"?: str,
-        "products"?: [{ "name": str, "code"?: str, "description"?: str }, ...] }
+    Body:
+      {
+        "name": str, "code": str, "country": str, "description"?: str,
+        "products"?: [
+           {"name": str, "code"?: str, "description"?: str},
+           ...
+        ]
+      }
     """
     payload = _json_body()
     if not payload:
@@ -93,6 +90,26 @@ def create_mine():
 @mine_bp.put("/<int:mine_id>")
 @mine_bp.patch("/<int:mine_id>")
 def update_mine(mine_id: int):
+    """
+    PUT/PATCH /api/mines/<mine_id>
+    Body (fields optional; only present ones will be changed):
+      {
+        "name"?: str, "code"?: str, "country"?: str, "description"?: str,
+
+        // To sync products, include the array below (omit the field to leave products unchanged)
+        "products"?: [
+          // Upsert:
+          {"id"?: int, "code"?: str, "name"?: str, "description"?: str},
+
+          // Delete specific:
+          {"id": 123, "_action": "delete"},
+          {"code": "ROM-FOO", "_action": "delete"}
+        ],
+
+        // If true, products NOT present in the array above will be deleted (soft-delete)
+        "delete_missing_products"?: bool
+      }
+    """
     payload = _json_body()
     if not payload:
         return _response(service.validation_error(["Request body must be a JSON object"]))
@@ -110,3 +127,4 @@ def delete_mine(mine_id: int):
 def restore_mine(mine_id: int):
     envelope = service.restore_mine(mine_id)
     return _response(envelope)
+
