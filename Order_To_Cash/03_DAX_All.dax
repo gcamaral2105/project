@@ -1,0 +1,967 @@
+/*  ==========================================================================
+    ORDER-TO-CASH SEMANTIC MODEL  —  DAX
+    ==========================================================================
+    7 calculated columns + 122 measures in 12 display folders.
+
+    BUILD ORDER
+      1. Create the calculated columns first (Part A) — several measures
+         reference them and will not validate without them.
+      2. Create a blank table named  _Measures  and put every measure on it.
+      3. Create measures in the printed order. Later ones reference earlier
+         ones ([Net Revenue USD] needs [Gross Revenue USD] and [Credits USD]).
+
+    THREE MEASURES THAT ARE EASY TO GET WRONG
+      Invoiced MT   adds Qty_Invoiced_MT AND Qty_Credited_MT. The two columns
+                    are mutually exclusive — of 4,569 rows carrying a credited
+                    quantity, not one carries an invoiced quantity. Summing
+                    only the first silently drops every credit.
+      Ordered MT    reads Ordered_MT_Signed, never the raw source column.
+                    Repointing it would still refresh, still look right, and
+                    be wrong by 4%.
+      Avg Selling   filters out Price_USD_Quality = 'Not convertible'. Never
+      Price USD     average the local-currency column — it mixes nine
+                    currencies and will always return a plausible number.
+    ========================================================================== */
+
+
+/*  ##########################################################################
+    PART A — CALCULATED COLUMNS
+    Modeling > New column, on the table named in each header.
+    ########################################################################## */
+
+// ---- dim_SalesOrderLine -------------------------------------------------
+// Order to shipment, in days. Blank on unshipped lines.
+// format: #,0
+Days_Order_To_Ship =
+    DATEDIFF(dim_SalesOrderLine[Ordered_Date], dim_SalesOrderLine[Actual_Shipment_Date], DAY)
+
+// ---- dim_SalesOrderLine -------------------------------------------------
+// Negative means early. Drives every on-time-vs-schedule measure.
+// format: #,0
+Ship_Delay_Days =
+    DATEDIFF(dim_SalesOrderLine[Schedule_Ship_Date], dim_SalesOrderLine[Actual_Shipment_Date], DAY)
+
+// ---- dim_SalesOrderLine -------------------------------------------------
+// Buckets for the lateness distribution visual.
+Delay_Bucket =
+    VAR d = dim_SalesOrderLine[Ship_Delay_Days]
+    RETURN
+        SWITCH(
+            TRUE(),
+            ISBLANK(d), "0 - Not shipped",
+            d <= -8,    "1 - >7d early",
+            d <= -1,    "2 - 1-7d early",
+            d = 0,      "3 - On time",
+            d = 1,      "4 - 1d late",
+            d <= 7,     "5 - 2-7d late",
+            d <= 14,    "6 - 8-14d late",
+            d <= 30,    "7 - 15-30d late",
+            "8 - 30d+ late"
+        )
+
+// ---- dim_SalesOrderLine -------------------------------------------------
+// Buckets for the cycle-time histogram.
+Cycle_Bucket =
+    VAR d = dim_SalesOrderLine[Days_Order_To_Ship]
+    RETURN
+        SWITCH(
+            TRUE(),
+            ISBLANK(d), "0 - Not shipped",
+            d <= 7,     "1 - 0-7d",
+            d <= 14,    "2 - 8-14d",
+            d <= 21,    "3 - 15-21d",
+            d <= 30,    "4 - 22-30d",
+            d <= 45,    "5 - 31-45d",
+            d <= 60,    "6 - 46-60d",
+            d <= 90,    "7 - 61-90d",
+            d <= 120,   "8 - 91-120d",
+            "9 - 120d+"
+        )
+
+// ---- fact_Shipment -------------------------------------------------
+// Negative means the delivery arrived early.
+// format: #,0
+Delivery_Delay_Days =
+    DATEDIFF(fact_Shipment[Planned_Arrival], fact_Shipment[Actual_Arrival], DAY)
+
+// ---- fact_Shipment -------------------------------------------------
+// Cross-border flag.
+Is_Export =
+    fact_Shipment[Ship_From_Country] <> fact_Shipment[Ship_To_Country]
+
+// ---- fact_Shipment -------------------------------------------------
+// Time parked at the destination stop.
+// format: #,0
+Dwell_Days =
+    DATEDIFF(fact_Shipment[Actual_Arrival], fact_Shipment[Actual_Departure], DAY)
+
+
+/*  ##########################################################################
+    PART B — MEASURES
+    Modeling > New measure, on the _Measures table.
+    ########################################################################## */
+
+
+/*  ------------------------------------------------------------------------
+    01 Base
+    ------------------------------------------------------------------------  */
+
+// Raw signed revenue. Everything downstream builds on this.
+// format: \$#,0
+Revenue USD =
+    SUM(fact_Invoice[Revenue_USD])
+
+// Revenue before credit memos.
+// format: \$#,0
+Gross Revenue USD =
+    CALCULATE([Revenue USD], fact_Invoice[Is_Credit_Memo] = FALSE())
+
+// Credit memo value. Always negative.
+// format: \$#,0
+Credits USD =
+    CALCULATE([Revenue USD], fact_Invoice[Is_Credit_Memo] = TRUE())
+
+// Revenue after credits. The headline number.
+// format: \$#,0
+Net Revenue USD =
+    [Gross Revenue USD] + [Credits USD]
+
+// Signed ordered volume. Returns count negative.
+// format: #,0
+Ordered MT =
+    SUM(fact_SalesOrder[Ordered_MT_Signed])
+
+// Shipped volume from delivery details.
+// format: #,0
+Shipped MT =
+    SUM(fact_Shipment[Shipped_MT])
+
+// Signed shipped volume on the order line. The correct partner for Ordered MT.
+// format: #,0
+Shipped MT Order View =
+    SUM(fact_SalesOrder[Shipped_MT_Signed])
+
+// Net billed volume. The two columns are mutually exclusive — both are required.
+// format: #,0
+Invoiced MT =
+    SUM(fact_Invoice[Qty_Invoiced_MT]) + SUM(fact_Invoice[Qty_Credited_MT])
+
+// Line count from the bridge.
+// format: #,0
+Order Lines =
+    COUNTROWS(dim_SalesOrderLine)
+
+// format: #,0
+Invoice Lines =
+    COUNTROWS(fact_Invoice)
+
+// format: #,0
+Shipment Records =
+    COUNTROWS(fact_Shipment)
+
+// format: #,0
+Deliveries =
+    DISTINCTCOUNT(fact_Shipment[Delivery_Id])
+
+// format: #,0
+Trips =
+    DISTINCTCOUNT(fact_Shipment[Trip_Id])
+
+
+/*  ------------------------------------------------------------------------
+    02 Currency
+    ------------------------------------------------------------------------  */
+
+// USD price came straight from the source.
+// format: #,0
+Price Source Lines =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "1 - Source")
+
+// USD price converted at the Corporate rate struck on the shipment date.
+// format: #,0
+Price Converted Lines =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "2 - Converted at Corporate rate")
+
+// No usable USD price. One line in the current extract — it carries no local price to convert.
+// format: #,0
+Price Unconvertible Lines =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "3 - Not convertible")
+
+// Should read 99.999%. Put it on any page showing an average price.
+// format: 0.0%
+Price Coverage % =
+
+    DIVIDE(
+    [Price Source Lines] + [Price Converted Lines],
+    COUNTROWS(fact_SalesOrder)
+    )
+
+// format: #,0
+Currencies in Context =
+    DISTINCTCOUNT(dim_SalesOrderLine[Currency_Code])
+
+// Never average the local-currency column — it mixes nine currencies and will always return a number.
+// format: \$#,0.00
+Avg Selling Price USD =
+    CALCULATE(
+    AVERAGE(fact_SalesOrder[Unit_Selling_Price_USD]),
+    fact_SalesOrder[Price_USD_Quality] <> "3 - Not convertible"
+    )
+
+// Same figure using no converted rows. Compare to prove the conversion is not shifting the answer.
+// format: \$#,0.00
+Avg Selling Price USD (Source Only) =
+    CALCULATE(
+    AVERAGE(fact_SalesOrder[Unit_Selling_Price_USD]),
+    fact_SalesOrder[Price_USD_Quality] = "1 - Source"
+    )
+
+// Gap between the all-rows and source-only figures. If it is material, review the rate basis.
+// format: 0.00%
+Conversion Impact % =
+
+    DIVIDE(
+    [Avg Selling Price USD] - [Avg Selling Price USD (Source Only)],
+    [Avg Selling Price USD (Source Only)]
+    )
+
+// The Corporate rate actually applied, for audit. Blank when more than one currency is in context.
+// format: #,0.00000
+Applied FX Rate =
+    IF(
+    HASONEVALUE(dim_SalesOrderLine[CurrencyKey]),
+    AVERAGE(fact_SalesOrder[FX_Rate]),
+    BLANK()
+    )
+
+// Fires when anything is missing or converted. Put it on the canvas of any price page.
+Currency Warning =
+
+    VAR Currencies    = [Currencies in Context]
+    VAR Unconvertible = [Price Unconvertible Lines]
+    VAR Coverage      = [Price Coverage %]
+    RETURN
+    SWITCH(
+    TRUE(),
+    Unconvertible > 0,
+    "! " & FORMAT(Unconvertible, "#,0") & " lines have no USD price and are excluded",
+    Coverage < 0.99,
+    "! Only " & FORMAT(Coverage, "0.000%") & " of lines have a usable USD price",
+    Currencies > 1 && [Price Converted Lines] > 0,
+    "i " & FORMAT([Price Converted Lines], "#,0") & " lines converted at the Corporate rate",
+    BLANK()
+    )
+
+// Conversion struck on the actual shipment date — realised, not forward-looking.
+// format: #,0
+Lines Priced at Shipment Date =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Date_Basis] = "1 - Actual shipment")
+
+// Share of rows converted on a forward date because the line has not shipped yet.
+// format: 0.0%
+FX Date Basis Fallback % =
+
+    DIVIDE(
+    CALCULATE(
+    COUNTROWS(fact_SalesOrder),
+    NOT fact_SalesOrder[FX_Date_Basis] IN {"1 - Actual shipment", "2 - Fulfilment"}
+    ),
+    COUNTROWS(fact_SalesOrder)
+    )
+
+// Dolar Compra lines. Resolved 1:1 with USD by the rate table — kept visible because the code is unusual.
+// format: #,0
+USC Lines =
+    CALCULATE(COUNTROWS(fact_SalesOrder), RELATED(dim_Currency[Currency_Code]) = "USC")
+
+// Open lines converted at the rate for the date promised to the customer. The forward-looking backlog basis.
+// format: #,0
+Lines Priced at Promise Date =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Date_Basis] = "3 - Promise date (forward)")
+
+// Rows whose FX date sits beyond the last quoted rate, so the last known rate is carried forward.
+// format: #,0
+Forward Rate Lines =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Rate_Is_Forward] = TRUE())
+
+// How much of the model rests on a carried-forward rate rather than a quoted one.
+// format: 0.00%
+Forward Rate Exposure % =
+
+    DIVIDE(
+    [Forward Rate Lines],
+    COUNTROWS(fact_SalesOrder)
+    )
+
+// Open volume valued at a carried-forward rate. Re-values when d_exchange_rate is refreshed.
+// format: #,0
+Backlog MT at Forward Rate =
+
+    CALCULATE(
+    [Backlog MT],
+    fact_SalesOrder[FX_Rate_Is_Forward] = TRUE()
+    )
+
+// Put this beside any backlog value so a forward estimate is never read as a settled figure.
+Backlog Value Status =
+
+    VAR Fwd = [Forward Rate Exposure %]
+    RETURN
+    IF(
+    Fwd > 0,
+    "Includes " & FORMAT([Forward Rate Lines], "#,0")
+    & " lines at a carried-forward rate",
+    "All rates quoted"
+    )
+
+
+/*  ------------------------------------------------------------------------
+    03 Commercial
+    ------------------------------------------------------------------------  */
+
+// Net revenue per tonne billed. The cleanest commercial measure in the model.
+// format: \$#,0.00
+Realised Price per MT =
+    DIVIDE([Net Revenue USD], [Invoiced MT])
+
+// format: \$#,0
+Revenue per Order Line =
+    DIVIDE([Net Revenue USD], [Order Lines])
+
+// Activates the inactive invoice-date relationship. Finance will want this view.
+// format: \$#,0
+Revenue by Invoice Date =
+    CALCULATE(
+    [Net Revenue USD],
+    USERELATIONSHIP(dim_Date[Date], fact_Invoice[Invoice_Date])
+    )
+
+// format: \$#,0
+Revenue YTD =
+    TOTALYTD([Revenue by Invoice Date], dim_Date[Date])
+
+// format: \$#,0
+Revenue PM =
+    CALCULATE([Revenue by Invoice Date], PREVIOUSMONTH(dim_Date[Date]))
+
+// format: 0.0%
+Revenue MoM % =
+    DIVIDE([Revenue by Invoice Date] - [Revenue PM], [Revenue PM])
+
+// Smooths the monthly noise.
+// format: \$#,0
+Revenue R3M Avg =
+    CALCULATE(
+    AVERAGEX(VALUES(dim_Date[Year_Month_Sort]), [Revenue by Invoice Date]),
+    DATESINPERIOD(dim_Date[Date], MAX(dim_Date[Date]), -3, MONTH)
+    )
+
+// format: \$#,0.00
+Realised Price PM =
+    CALCULATE([Realised Price per MT], PREVIOUSMONTH(dim_Date[Date]))
+
+// format: 0.0%
+Realised Price MoM % =
+    DIVIDE([Realised Price per MT] - [Realised Price PM], [Realised Price PM])
+
+
+/*  ------------------------------------------------------------------------
+    04 Price Bridge
+    ------------------------------------------------------------------------  */
+
+// format: \$#,0
+Base Revenue =
+    SUM(fact_Invoice[Base_Amount])
+
+// format: \$#,0
+Regional Premium =
+    SUM(fact_Invoice[Regional_Premium])
+
+// format: \$#,0
+Product Premium =
+    SUM(fact_Invoice[Product_Premium])
+
+// format: \$#,0
+Green Premium =
+    SUM(fact_Invoice[Green_Premium])
+
+// format: \$#,0
+Other Premium =
+    SUM(fact_Invoice[Other_Premium])
+
+// format: \$#,0
+Tariff Amount =
+    SUM(fact_Invoice[Tariff_Amount])
+
+// format: \$#,0
+Alloy Adjustment =
+    SUM(fact_Invoice[Alloy_Amount])
+
+// All premium above the commodity base.
+// format: \$#,0
+Total Premium USD =
+    [Regional Premium] + [Product Premium] + [Green Premium] + [Other Premium]
+
+// Volume on lines carrying a full price breakdown.
+// format: #,0
+Bridge MT =
+    CALCULATE([Invoiced MT], fact_Invoice[Has_Price_Bridge] = TRUE())
+
+// format: \$#,0
+Bridge Revenue USD =
+    CALCULATE([Net Revenue USD], fact_Invoice[Has_Price_Bridge] = TRUE())
+
+// How much of revenue the bridge explains. SAM and AUS carry none — always show this next to a bridge visual.
+// format: 0.0%
+Price Bridge Coverage % =
+    DIVIDE([Bridge Revenue USD], [Net Revenue USD])
+
+// Denominator restricted to bridge-covered lines, so the ratio is honest.
+// format: 0.0%
+Premium % of Revenue =
+    DIVIDE([Total Premium USD], [Bridge Revenue USD])
+
+// format: \$#,0.00
+Base Price per MT =
+    DIVIDE([Base Revenue], [Bridge MT])
+
+// format: \$#,0.00
+Regional Premium per MT =
+    DIVIDE([Regional Premium], [Bridge MT])
+
+// format: \$#,0.00
+Product Premium per MT =
+    DIVIDE([Product Premium], [Bridge MT])
+
+// format: \$#,0.00
+Green Premium per MT =
+    DIVIDE([Green Premium], [Bridge MT])
+
+// format: \$#,0.00
+Premium per MT =
+    DIVIDE([Total Premium USD], [Bridge MT])
+
+// Components reconcile to this within 0.7%.
+// format: \$#,0.00
+Bridge Realised Price per MT =
+    DIVIDE([Bridge Revenue USD], [Bridge MT])
+
+// Share of invoice lines carrying a green premium.
+// format: 0.0%
+Green Premium Penetration % =
+    DIVIDE(
+    CALCULATE(COUNTROWS(fact_Invoice), fact_Invoice[Green_Premium] <> 0),
+    COUNTROWS(fact_Invoice)
+    )
+
+
+/*  ------------------------------------------------------------------------
+    05 Revenue Quality
+    ------------------------------------------------------------------------  */
+
+// Billing accuracy in one number.
+// format: 0.00%
+Credit Rate % =
+    DIVIDE(ABS([Credits USD]), [Gross Revenue USD])
+
+// format: #,0
+Credit Memo Lines =
+    CALCULATE(COUNTROWS(fact_Invoice), fact_Invoice[Is_Credit_Memo] = TRUE())
+
+// format: 0.0%
+Credit Memo Rate % =
+    DIVIDE([Credit Memo Lines], COUNTROWS(fact_Invoice))
+
+// format: \$#,0
+Avg Credit Value =
+    DIVIDE([Credits USD], [Credit Memo Lines])
+
+// format: \$#,0
+Credits by Invoice Date =
+    CALCULATE(
+    [Credits USD],
+    USERELATIONSHIP(dim_Date[Date], fact_Invoice[Invoice_Date])
+    )
+
+// The trend that matters. On the order-date timeline the spike is invisible.
+// format: 0.00%
+Credit Rate by Invoice Date =
+    VAR G =
+    CALCULATE([Gross Revenue USD], USERELATIONSHIP(dim_Date[Date], fact_Invoice[Invoice_Date]))
+    VAR C =
+    CALCULATE([Credits USD], USERELATIONSHIP(dim_Date[Date], fact_Invoice[Invoice_Date]))
+    RETURN
+    DIVIDE(ABS(C), G)
+
+// Traffic light against a 1% watch and 2% critical threshold.
+Credit Rate Status =
+    VAR r = [Credit Rate by Invoice Date]
+    RETURN
+    SWITCH(
+    TRUE(),
+    ISBLANK(r),  BLANK(),
+    r >= 0.02,   "Critical",
+    r >= 0.01,   "Watch",
+    "Healthy"
+    )
+
+
+/*  ------------------------------------------------------------------------
+    06 Order to Cash
+    ------------------------------------------------------------------------  */
+
+// Open order book valued in USD. Unshipped lines convert at their promise-date rate, so this is a forward estimate.
+// format: \$#,0
+Backlog Value USD =
+
+    SUMX(
+    fact_SalesOrder,
+    fact_SalesOrder[Ordered_MT_Signed] * fact_SalesOrder[Unit_Selling_Price_USD]
+    )
+
+// Share of ordered volume shipped.
+// format: 0.0%
+Fulfilment Rate % =
+    DIVIDE([Shipped MT Order View], [Ordered MT])
+
+// Share of shipped volume invoiced.
+// format: 0.0%
+Billing Rate % =
+    DIVIDE([Invoiced MT], [Shipped MT Order View])
+
+// format: 0.0%
+OTC Conversion % =
+    DIVIDE([Invoiced MT], [Ordered MT])
+
+// format: #,0
+Open to Ship MT =
+    [Ordered MT] - [Shipped MT Order View]
+
+// Shipped but not invoiced. Should sit near zero.
+// format: #,0
+Unbilled Shipped MT =
+    [Shipped MT Order View] - [Invoiced MT]
+
+// format: #,0
+Backlog MT =
+    CALCULATE([Ordered MT], dim_SalesOrderLine[Is_Open] = TRUE())
+
+// format: #,0
+Open Order Lines =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Is_Open] = TRUE())
+
+// Should be zero — the source query intends to exclude these. See the SQL precedence note.
+// format: #,0
+Cancelled Lines =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Is_Cancelled] = TRUE())
+
+// format: 0.00%
+Cancellation Rate % =
+    DIVIDE([Cancelled Lines], [Order Lines])
+
+// How many days of recent shipping the order book represents.
+// format: #,0.0
+Backlog Coverage Days =
+    VAR RecentShipped =
+    CALCULATE(
+    [Shipped MT],
+    DATESINPERIOD(dim_Date[Date], MAX(dim_Date[Date]), -90, DAY)
+    )
+    RETURN
+    DIVIDE([Backlog MT], DIVIDE(RecentShipped, 90))
+
+
+/*  ------------------------------------------------------------------------
+    07 Service
+    ------------------------------------------------------------------------  */
+
+// format: #,0
+Lines Shipped =
+    CALCULATE([Order Lines], NOT ISBLANK(dim_SalesOrderLine[Actual_Shipment_Date]))
+
+// The internal-commitment view.
+// format: 0.0%
+On Time vs Schedule % =
+    VAR Base =
+    CALCULATE(
+    [Order Lines],
+    NOT ISBLANK(dim_SalesOrderLine[Actual_Shipment_Date]),
+    NOT ISBLANK(dim_SalesOrderLine[Schedule_Ship_Date])
+    )
+    VAR OnTime =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Ship_Delay_Days] <= 0)
+    RETURN
+    DIVIDE(OnTime, Base)
+
+// The customer-facing view, and the weakest of the three.
+// format: 0.0%
+On Time vs Promise % =
+    VAR Base =
+    CALCULATE(
+    [Order Lines],
+    NOT ISBLANK(dim_SalesOrderLine[Actual_Shipment_Date]),
+    NOT ISBLANK(dim_SalesOrderLine[Promise_Date])
+    )
+    VAR OnTime =
+    CALCULATE(
+    [Order Lines],
+    FILTER(
+    dim_SalesOrderLine,
+    dim_SalesOrderLine[Actual_Shipment_Date] <= dim_SalesOrderLine[Promise_Date]
+    )
+    )
+    RETURN
+    DIVIDE(OnTime, Base)
+
+// format: 0.0%
+On Time vs Request % =
+    VAR Base =
+    CALCULATE(
+    [Order Lines],
+    NOT ISBLANK(dim_SalesOrderLine[Actual_Shipment_Date]),
+    NOT ISBLANK(dim_SalesOrderLine[Request_Date])
+    )
+    VAR OnTime =
+    CALCULATE(
+    [Order Lines],
+    FILTER(
+    dim_SalesOrderLine,
+    dim_SalesOrderLine[Actual_Shipment_Date] <= dim_SalesOrderLine[Request_Date]
+    )
+    )
+    RETURN
+    DIVIDE(OnTime, Base)
+
+// format: #,0
+Lines Shipped Late =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Ship_Delay_Days] > 0)
+
+// The tail that costs relationships.
+// format: #,0
+Lines 30d+ Late =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Ship_Delay_Days] > 30)
+
+// Skewed by the tail — read alongside the median.
+// format: #,0.0
+Avg Ship Delay Days =
+    AVERAGE(dim_SalesOrderLine[Ship_Delay_Days])
+
+// format: #,0.0
+Median Ship Delay Days =
+    MEDIAN(dim_SalesOrderLine[Ship_Delay_Days])
+
+// Report this, not the mean. The mean is roughly double.
+// format: #,0.0
+Median Cycle Days =
+    MEDIAN(dim_SalesOrderLine[Days_Order_To_Ship])
+
+// format: #,0.0
+Avg Cycle Days =
+    AVERAGE(dim_SalesOrderLine[Days_Order_To_Ship])
+
+// The realistic service promise. Set promise dates from this, not the best case.
+// format: #,0.0
+P90 Cycle Days =
+    PERCENTILE.INC(dim_SalesOrderLine[Days_Order_To_Ship], 0.9)
+
+// Arrivals on or before plan. Computable on 76% of rows.
+// format: 0.0%
+On Time Delivery % =
+    VAR Base =
+    CALCULATE(COUNTROWS(fact_Shipment), NOT ISBLANK(fact_Shipment[Actual_Arrival]))
+    VAR OnTime =
+    CALCULATE(COUNTROWS(fact_Shipment), fact_Shipment[Delivery_Delay_Days] <= 0)
+    RETURN
+    DIVIDE(OnTime, Base)
+
+// format: #,0.0
+Avg Delivery Delay Days =
+    AVERAGE(fact_Shipment[Delivery_Delay_Days])
+
+// format: 0.0%
+In Full Rate % =
+    DIVIDE(
+    CALCULATE(
+    [Order Lines],
+    FILTER(
+    fact_SalesOrder,
+    fact_SalesOrder[Shipped_MT_Signed] >= fact_SalesOrder[Ordered_MT_Signed]
+    )
+    ),
+    [Order Lines]
+    )
+
+// Agree the on-time baseline with the business before publishing this.
+// format: 0.0%
+OTIF % =
+    VAR Qualified =
+    CALCULATE(
+    [Order Lines],
+    FILTER(
+    dim_SalesOrderLine,
+    dim_SalesOrderLine[Ship_Delay_Days] <= 0
+    && RELATED(fact_SalesOrder[Shipped_MT_Signed])
+    >= RELATED(fact_SalesOrder[Ordered_MT_Signed])
+    )
+    )
+    RETURN
+    DIVIDE(Qualified, [Order Lines])
+
+
+/*  ------------------------------------------------------------------------
+    08 Logistics
+    ------------------------------------------------------------------------  */
+
+// format: #,0.0
+Avg MT per Delivery =
+    DIVIDE([Shipped MT], [Deliveries])
+
+// format: #,0.0
+Avg MT per Trip =
+    DIVIDE([Shipped MT], [Trips])
+
+// Consolidation efficiency.
+// format: #,0.00
+Deliveries per Trip =
+    DIVIDE([Deliveries], [Trips])
+
+// format: #,0
+Active Carriers =
+    CALCULATE(DISTINCTCOUNT(fact_Shipment[CarrierKey]), fact_Shipment[CarrierKey] <> "-1")
+
+// format: #,0
+Requested MT =
+    SUM(fact_Shipment[Requested_MT])
+
+// format: #,0
+Picked MT =
+    SUM(fact_Shipment[Picked_MT])
+
+// Cancellation after picking began — distinct from an order-level cancellation.
+// format: #,0
+Cancelled MT Logistics =
+    SUM(fact_Shipment[Cancelled_MT])
+
+// format: 0.0%
+Pick Completion % =
+    DIVIDE([Picked MT], [Requested MT])
+
+// format: 0.0%
+Ship Completion % =
+    DIVIDE([Shipped MT], [Picked MT])
+
+// Freight paid on non-product weight.
+// format: 0.0%
+Packaging Overhead % =
+    DIVIDE(
+    SUM(fact_Shipment[Gross_Weight_MT]) - SUM(fact_Shipment[Net_Weight_MT]),
+    SUM(fact_Shipment[Net_Weight_MT])
+    )
+
+// format: 0.0%
+Export Share % =
+    DIVIDE(
+    CALCULATE(COUNTROWS(fact_Shipment), fact_Shipment[Is_Export] = TRUE()),
+    COUNTROWS(fact_Shipment)
+    )
+
+// format: #,0
+Countries Served =
+    DISTINCTCOUNT(fact_Shipment[Ship_To_Country])
+
+// format: 0.0%
+Carrier Volume Share % =
+    DIVIDE([Shipped MT], CALCULATE([Shipped MT], ALL(dim_Carrier)))
+
+// Blind spot in the carrier scorecard.
+// format: 0.0%
+Missing Carrier % =
+    DIVIDE(
+    CALCULATE(COUNTROWS(fact_Shipment), fact_Shipment[CarrierKey] = "-1"),
+    COUNTROWS(fact_Shipment)
+    )
+
+// Tolerance columns are ~100% populated, so this is reliable.
+// format: 0.00%
+Tolerance Breach % =
+    DIVIDE(
+    CALCULATE(
+    COUNTROWS(fact_Shipment),
+    FILTER(
+    fact_Shipment,
+    fact_Shipment[Shipped_MT] >
+    fact_Shipment[Requested_MT] * (1 + fact_Shipment[Tolerance_Above_Pct] / 100)
+    )
+    ),
+    COUNTROWS(fact_Shipment)
+    )
+
+
+/*  ------------------------------------------------------------------------
+    09 Returns & Credits
+    ------------------------------------------------------------------------  */
+
+// format: #,0
+Return Lines =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Is_Return] = TRUE())
+
+// Label this Credit Note Rate externally. Most returns are billing corrections, not goods coming back.
+// format: 0.00%
+Return Rate % =
+    DIVIDE([Return Lines], [Order Lines])
+
+// format: #,0
+Returned MT =
+    ABS(CALCULATE([Ordered MT], dim_SalesOrderLine[Is_Return] = TRUE()))
+
+// format: 0.00%
+Return Rate Volume % =
+    DIVIDE(
+    [Returned MT],
+    CALCULATE([Ordered MT], dim_SalesOrderLine[Is_Return] = FALSE())
+    )
+
+// Genuinely rejected inventory. 38 of 608 returns.
+// format: #,0
+Physical Return Lines =
+    CALCULATE([Order Lines], dim_ReturnReason[Is_Physical_Return] = TRUE())
+
+// The true product-quality metric.
+// format: 0.00%
+Physical Return Rate % =
+    DIVIDE([Physical Return Lines], [Order Lines])
+
+// format: #,0
+Commercial Adjustment Lines =
+    CALCULATE([Return Lines], dim_ReturnReason[Reason_Group] = "Commercial adjustment")
+
+// High share means pricing accuracy, not quality, is the problem.
+// format: 0.0%
+Commercial Adjustment Share % =
+    DIVIDE([Commercial Adjustment Lines], [Return Lines])
+
+
+/*  ------------------------------------------------------------------------
+    10 Customer & Product
+    ------------------------------------------------------------------------  */
+
+// format: #,0
+Active Customers =
+    CALCULATE(DISTINCTCOUNT(dim_SalesOrderLine[CustomerKey]), [Net Revenue USD] <> 0)
+
+// format: \$#,0
+Revenue per Customer =
+    DIVIDE([Net Revenue USD], [Active Customers])
+
+// format: #,0
+Active Products =
+    DISTINCTCOUNT(dim_SalesOrderLine[ProductKey])
+
+// format: #,0
+Customer Revenue Rank =
+    RANKX(ALL(dim_Customer[CustomerKey]), [Net Revenue USD], , DESC, DENSE)
+
+// format: 0.0%
+Top 10 Customer Share % =
+    VAR T = TOPN(10, ALL(dim_Customer[CustomerKey]), [Net Revenue USD], DESC)
+    RETURN
+    DIVIDE(
+    CALCULATE([Net Revenue USD], T),
+    CALCULATE([Net Revenue USD], ALL(dim_Customer))
+    )
+
+// format: 0.0%
+Top 20 Customer Share % =
+    VAR T = TOPN(20, ALL(dim_Customer[CustomerKey]), [Net Revenue USD], DESC)
+    RETURN
+    DIVIDE(
+    CALCULATE([Net Revenue USD], T),
+    CALCULATE([Net Revenue USD], ALL(dim_Customer))
+    )
+
+// Herfindahl index. Below 1,500 is unconcentrated.
+// format: #,0
+Customer HHI =
+    SUMX(
+    VALUES(dim_Customer[CustomerKey]),
+    POWER(
+    DIVIDE([Net Revenue USD], CALCULATE([Net Revenue USD], ALL(dim_Customer))) * 100,
+    2
+    )
+    )
+
+// Drives the Pareto curve.
+// format: 0.0%
+Cumulative Revenue Share % =
+    VAR CurrentRank = [Customer Revenue Rank]
+    VAR Total       = CALCULATE([Net Revenue USD], ALL(dim_Customer))
+    VAR Running =
+    CALCULATE(
+    [Net Revenue USD],
+    FILTER(ALL(dim_Customer[CustomerKey]), [Customer Revenue Rank] <= CurrentRank)
+    )
+    RETURN
+    DIVIDE(Running, Total)
+
+// format: 0.0%
+Top 10 Product Share % =
+    VAR T = TOPN(10, ALL(dim_Product[ProductKey]), [Net Revenue USD], DESC)
+    RETURN
+    DIVIDE(
+    CALCULATE([Net Revenue USD], T),
+    CALCULATE([Net Revenue USD], ALL(dim_Product))
+    )
+
+
+/*  ------------------------------------------------------------------------
+    11 Data Quality
+    ------------------------------------------------------------------------  */
+
+// Keep this on the canvas. It catches the one failure mode the bridge architecture exists to prevent.
+Fan Out Alert =
+    IF(
+    [Invoiced MT] > [Ordered MT] * 1.05,
+    "FAN-OUT DETECTED",
+    "Model OK"
+    )
+
+// format: #,0
+Orphan Shipment Rows =
+    CALCULATE(
+    COUNTROWS(fact_Shipment),
+    ISBLANK(RELATED(dim_SalesOrderLine[LineKey]))
+    )
+
+// format: 0.0%
+Missing Promise Date % =
+    DIVIDE(
+    CALCULATE([Order Lines], ISBLANK(dim_SalesOrderLine[Promise_Date])),
+    [Order Lines]
+    )
+
+// Should read zero once the date cap is applied.
+// format: #,0
+Sentinel Date Lines =
+    CALCULATE([Order Lines], dim_SalesOrderLine[Schedule_Ship_Date] > DATE(2030,12,30))
+
+// format: #,0
+Unknown Currency Lines =
+    CALCULATE([Order Lines], dim_Currency[Currency_Code] = "UNK")
+
+
+/*  ------------------------------------------------------------------------
+    12 Report Helpers
+    ------------------------------------------------------------------------  */
+
+Selected Period Label =
+    VAR MinD = MIN(dim_Date[Date])
+    VAR MaxD = MAX(dim_Date[Date])
+    RETURN
+    FORMAT(MinD, "d mmm yyyy") & "  to  " & FORMAT(MaxD, "d mmm yyyy")
+
+Partial Month Warning =
+    IF(
+    SELECTEDVALUE(dim_Date[Is_Complete_Month]) = FALSE(),
+    "Partial month - do not read as a decline",
+    BLANK()
+    )
