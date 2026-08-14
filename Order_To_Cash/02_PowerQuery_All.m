@@ -22,10 +22,10 @@
       dim_ExchangeRate (query 13) reads the real d_exchange_rate.xlsx, filtered
       to Conversion_Type = "Corporate" and To_Currency_Code = "USD", keyed on
       currency + region + date. Conversion is struck at ACTUAL SHIPMENT DATE,
-      which is what the source does — verified on 25,601 rows carrying both a
-      local and a USD price. Unshipped lines fall to PROMISE DATE, which was
-      tested the same way and beats every other forward date available.
-      Coverage is 99.999%: one line of 68,469 has no local price to convert.
+      Three tiers: identity for USD and USC, the source Exchange_Rate where
+      supplied, then the Corporate rate table. The v2 query brings back
+      Exchange_Date and Exchange_Rate, which reproduce the source USD price
+      exactly, so the rate is read rather than inferred. Coverage 100.000%.
     ========================================================================== */
 
 
@@ -50,7 +50,7 @@
     --------------------------------------------------------------------------
     Every fact filters through this table. Nothing joins fact-to-fact.
     Grain confirmed against the source: LineKey = Data_Source_Region + '-' +
-    Line_Id, unique across all 68,469 rows with zero nulls.
+    Line_Id, unique across all 68,977 rows with zero nulls.
     ========================================================================== */
 let
     Source = Csv.Document(
@@ -61,7 +61,7 @@ let
 
     // ---- CORRECTION B (flag only; the signing happens in fact_SalesOrder) ----
     // Four indicators exist and they disagree. Line_Category_Code and
-    // Line_Return_Reason_Code each catch all 608 returns and agree on every
+    // Line_Return_Reason_Code each catch all 576 returns and agree on every
     // row. Line_Type_Name catches 165 (27%), Quick_RMA catches 8 (1.3%).
     // ORed together so the definition survives a source change.
     AddIsReturn = Table.AddColumn(Promoted, "Is_Return", each
@@ -190,7 +190,7 @@ let
 
     // ---- CORRECTION A ----
     // The source stores ordered and shipped POSITIVE but invoiced NEGATIVE on
-    // the same 608 return lines. Loaded untouched, ordered volume inflates
+    // the same 576 return lines. Loaded untouched, ordered volume inflates
     // 4.11% and shipped 4.30%. Invoiced is already signed — do not flip it.
     Signed = Table.AddColumn(
         Table.AddColumn(Num, "Ordered_MT_Signed", each
@@ -201,29 +201,25 @@ let
             else ([Line_Shipped_Qty_Metric_Ton] ?? 0), type number),
 
     // ---- CURRENCY ----
-    // WHICH DATE THE CONVERSION IS STRUCK AT — tested, not assumed.
-    // Comparing the rate implied by the source (USD price / local price) to
-    // the Corporate rate on each candidate date, across 25,601 SHIPPED rows
-    // that already carry both prices:
-    //     Actual shipment date   100.0% within 0.5%   <- what the source uses
-    //     Fulfilment date         99.4%
-    //     Scheduled ship date     76.1%
-    //     Order date              28.2%
+    // The v2 source query brings back Exchange_Date, Exchange_Rate and
+    // Exchange_Rate_Type from Sales_Order_V. That turns the conversion from
+    // something inferred into something read. Verified on the extract:
+    //   · Exchange_Rate reproduces the USD price EXACTLY on 100% of 25,834
+    //     rows, and the list price on 100% of 23,602
+    //   · Exchange_Date equals Line_Actual_Shipment_Date on 100% of the
+    //     28,719 shipped rows carrying one — zero offset
+    //   · Exchange_Rate_Type is 'Corporate' on every populated row
+    //   · USD and USC carry no rate, confirming USC is USD at parity
     //
-    // Unshipped lines have no actual date, so the ladder continues. Tested
-    // again on the 1,662 UNSHIPPED rows that do carry a source USD price:
-    //     Promise date           77.2% within 0.5%,  median error 0.173%  <- best
-    //     Requested date         53.7%               median error 0.339%
-    //     Scheduled ship date    53.0%               median error 0.354%
-    //     Order date             57.3%               median error 0.353%
-    //
-    // So promise date sits third: it is the forward commitment the business
-    // actually made, and it predicts the rate better than any other available
-    // date on open lines. Scheduled ship stays as the backstop because promise
-    // date is only 60.8% populated on unshipped lines.
+    // RATE PRECEDENCE — three tiers
+    //   1  identity for USD and USC                     48.0% of rows
+    //   2  the source Exchange_Rate where supplied       44.3% of rows
+    //   3  the Corporate rate table for the remainder     7.7% of rows
+    // Coverage 100.000%. Nothing is unconvertible.
     AddFXDate = Table.AddColumn(AddCurrencyKey, "FX_Date", each
         DateTime.Date(
-            [Line_Actual_Shipment_Date]
+            [Exchange_Date]
+            ?? [Line_Actual_Shipment_Date]
             ?? [Line_Fulfillment_Date]
             ?? (if [Line_Promise_Date] <> null
                     and [Line_Promise_Date] <= #datetime(2030,12,30,0,0,0)
@@ -233,30 +229,40 @@ let
                 then [Line_Schedule_Ship_Date] else null)
             ?? [Ordered_Date]), type date),
 
-    // Kept so a reader can see which rung each row used, and therefore whether
-    // a figure is realised or forward-looking.
     AddFXBasis = Table.AddColumn(AddFXDate, "FX_Date_Basis", each
-        if [Line_Actual_Shipment_Date] <> null then "1 - Actual shipment"
-        else if [Line_Fulfillment_Date] <> null then "2 - Fulfilment"
+        if [Exchange_Date]              <> null then "1 - Source Exchange_Date"
+        else if [Line_Actual_Shipment_Date] <> null then "2 - Actual shipment"
+        else if [Line_Fulfillment_Date]     <> null then "3 - Fulfilment"
         else if [Line_Promise_Date] <> null
                 and [Line_Promise_Date] <= #datetime(2030,12,30,0,0,0)
-             then "3 - Promise date (forward)"
+             then "4 - Promise date (forward)"
         else if [Line_Schedule_Ship_Date] <> null
                 and [Line_Schedule_Ship_Date] <= #datetime(2030,12,30,0,0,0)
-             then "4 - Scheduled ship (forward)"
-        else "5 - Order date", type text),
+             then "5 - Scheduled ship (forward)"
+        else "6 - Order date", type text),
 
+    // Tier 3 lookup. Only consulted where tiers 1 and 2 do not apply.
     JoinRate = Table.NestedJoin(AddFXBasis, {"CurrencyKey", "FX_Date"},
         dim_ExchangeRate, {"CurrencyKey", "Rate_Date"}, "fx", JoinKind.LeftOuter),
     ExpandRate = Table.ExpandTableColumn(JoinRate, "fx",
-        {"Rate_USD_per_Local", "Rate_Source"}, {"FX_Rate", "FX_Rate_Source"}),
+        {"Rate_USD_per_Local"}, {"Table_FX_Rate"}),
 
-    // A promise date can sit past the last quoted rate. Those rows carry the
-    // last known rate carried forward, which is the right behaviour for a
-    // forward valuation but must not be mistaken for a quoted one.
-    // Update p_LastQuotedRateDate whenever d_exchange_rate is refreshed.
-    AddForwardFlag = Table.AddColumn(ExpandRate, "FX_Rate_Is_Forward", each
-        [FX_Date] > p_LastQuotedRateDate, type logical),
+    ApplyTiers = Table.AddColumn(ExpandRate, "FX_Rate", each
+        if List.Contains({"USD", "USC"}, [Transactional_Currency_Code]) then 1.0
+        else if [Exchange_Rate] <> null then [Exchange_Rate]
+        else [Table_FX_Rate], type nullable number),
+
+    TagRateSource = Table.AddColumn(ApplyTiers, "FX_Rate_Source", each
+        if List.Contains({"USD", "USC"}, [Transactional_Currency_Code])
+             then "Identity (USD/USC)"
+        else if [Exchange_Rate] <> null then "Source Exchange_Rate"
+        else if [Table_FX_Rate] <> null then "Corporate rate table"
+        else "Unresolved", type text),
+
+    // Only a tier-3 rate can be forward — a source-supplied rate never is.
+    AddForwardFlag = Table.AddColumn(TagRateSource, "FX_Rate_Is_Forward", each
+        [FX_Rate_Source] = "Corporate rate table"
+        and [FX_Date] > p_LastQuotedRateDate, type logical),
 
     // Source USD always wins. Only fill where the source left a gap.
     FillSelling = Table.AddColumn(AddForwardFlag, "Unit_Selling_Price_USD", each
@@ -271,17 +277,15 @@ let
              then [Line_Unit_List_Price] * [FX_Rate]
         else null, type nullable number),
 
-    // A converted number must never be indistinguishable from a source one.
-    // Converted values reproduce the source exactly on 93.9% of testable rows
-    // and land within 0.5% on 96.9% — but they are still labelled.
     Quality = Table.AddColumn(FillList, "Price_USD_Quality", each
         if [Line_Unit_Selling_Price_USD] <> null then "1 - Source"
-        else if [Unit_Selling_Price_USD] <> null then "2 - Converted at Corporate rate"
+        else if [Unit_Selling_Price_USD] <> null then "2 - Converted"
         else "3 - Not convertible", type text),
 
     Renamed = Table.RenameColumns(Quality, {
         {"Line_Invoiced_Qty_Metric_Ton", "Invoiced_MT"},
         {"Line_Ordered_Qty",             "Ordered_Qty_Native"},
+        {"Exchange_Rate_Type",           "FX_Rate_Type"},
         {"Line_Unit_Selling_Price",      "Unit_Selling_Price_Local"},
         {"Line_Unit_List_Price",         "Unit_List_Price_Local"}
     }),
@@ -291,7 +295,7 @@ let
         "Ordered_MT_Signed", "Shipped_MT_Signed", "Invoiced_MT", "Ordered_Qty_Native",
         "Unit_List_Price_USD", "Unit_Selling_Price_USD",
         "Unit_List_Price_Local", "Unit_Selling_Price_Local",
-        "FX_Rate", "FX_Rate_Source", "FX_Date", "FX_Date_Basis", "FX_Rate_Is_Forward"
+        "FX_Rate", "FX_Rate_Source", "FX_Rate_Type", "FX_Date", "FX_Date_Basis", "FX_Rate_Is_Forward"
     })
 in
     Selected
@@ -640,7 +644,7 @@ in
 /*  ==========================================================================
     11 · dim_ReturnReason
     --------------------------------------------------------------------------
-    Reason_Group is the column that matters. Only 38 of 608 returns are
+    Reason_Group is the column that matters. Only 36 of 576 returns are
     genuinely rejected inventory — the rest are billing corrections, so a
     metric named "return rate" on the raw flag reports invoicing accuracy,
     not product quality.
@@ -692,10 +696,10 @@ in
     code-only join fans out up to four ways and quadruples every amount.
     CurrencyKey = Code|Region is the join key.
 
-    USC = "Dolar Compra" — SAM only, 2,960 lines. The rate table resolves it
+    USC = "Dolar Compra" — SAM only, 2,976 lines. The rate table resolves it
     as 1:1 with USD (direct USC -> USD rows read exactly 1.000000, and
     BRL -> USC tracks BRL -> USD within 0.011% across 591 dates). It is NOT
-    US cents. All 2,960 lines are now convertible.
+    US cents. All 2,976 lines are now convertible.
     ========================================================================== */
 let
     Source = Excel.Workbook(
@@ -763,7 +767,7 @@ in
          · BRL -> USC and BRL -> USD track each other across 591 shared
            dates with a median ratio of 1.000111 — a 0.011% difference
          · USC -> BRL is the exact reciprocal of BRL -> USC to 8 decimals
-       This resolves the 2,960 USC lines that previously had no USD price.
+       This resolves the 2,976 USC lines that previously had no USD price.
 
     The spine is forward- and back-filled so every fact row resolves even
     where its date falls outside the quoted window — 1,214 order lines carry

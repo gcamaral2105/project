@@ -177,17 +177,17 @@ Trips =
 Price Source Lines =
     CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "1 - Source")
 
-// USD price converted at the Corporate rate struck on the shipment date.
+// USD price computed from the three-tier rate hierarchy rather than supplied by the source.
 // format: #,0
 Price Converted Lines =
-    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "2 - Converted at Corporate rate")
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "2 - Converted")
 
-// No usable USD price. One line in the current extract — it carries no local price to convert.
+// No usable USD price. Zero on the v2 extract — kept as a guard.
 // format: #,0
 Price Unconvertible Lines =
     CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[Price_USD_Quality] = "3 - Not convertible")
 
-// Should read 99.999%. Put it on any page showing an average price.
+// Should read 100.000%. Put it on any page showing an average price.
 // format: 0.0%
 Price Coverage % =
 
@@ -237,25 +237,25 @@ Applied FX Rate =
 // Fires when anything is missing or converted. Put it on the canvas of any price page.
 Currency Warning =
 
-    VAR Currencies    = [Currencies in Context]
     VAR Unconvertible = [Price Unconvertible Lines]
     VAR Coverage      = [Price Coverage %]
+    VAR Forward       = [Forward Rate Lines]
     RETURN
     SWITCH(
     TRUE(),
     Unconvertible > 0,
     "! " & FORMAT(Unconvertible, "#,0") & " lines have no USD price and are excluded",
-    Coverage < 0.99,
+    Coverage < 1,
     "! Only " & FORMAT(Coverage, "0.000%") & " of lines have a usable USD price",
-    Currencies > 1 && [Price Converted Lines] > 0,
-    "i " & FORMAT([Price Converted Lines], "#,0") & " lines converted at the Corporate rate",
+    Forward > 0,
+    "i " & FORMAT(Forward, "#,0") & " lines valued at a carried-forward rate",
     BLANK()
     )
 
 // Conversion struck on the actual shipment date — realised, not forward-looking.
 // format: #,0
 Lines Priced at Shipment Date =
-    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Date_Basis] = "1 - Actual shipment")
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Date_Basis] = "2 - Actual shipment")
 
 // Share of rows converted on a forward date because the line has not shipped yet.
 // format: 0.0%
@@ -264,7 +264,8 @@ FX Date Basis Fallback % =
     DIVIDE(
     CALCULATE(
     COUNTROWS(fact_SalesOrder),
-    NOT fact_SalesOrder[FX_Date_Basis] IN {"1 - Actual shipment", "2 - Fulfilment"}
+    NOT fact_SalesOrder[FX_Date_Basis] IN {
+    "1 - Source Exchange_Date", "2 - Actual shipment", "3 - Fulfilment" }
     ),
     COUNTROWS(fact_SalesOrder)
     )
@@ -274,10 +275,25 @@ FX Date Basis Fallback % =
 USC Lines =
     CALCULATE(COUNTROWS(fact_SalesOrder), RELATED(dim_Currency[Currency_Code]) = "USC")
 
+// Rows using the rate the source itself supplied. It reproduces the USD price exactly.
+// format: #,0
+Lines at Source Rate =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Rate_Source] = "Source Exchange_Rate")
+
+// Rows converted by looking the rate up in d_exchange_rate. The only tier that can be forward.
+// format: #,0
+Lines at Table Rate =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Rate_Source] = "Corporate rate table")
+
+// USD and USC rows. No conversion applied.
+// format: #,0
+Lines at Identity Rate =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Rate_Source] = "Identity (USD/USC)")
+
 // Open lines converted at the rate for the date promised to the customer. The forward-looking backlog basis.
 // format: #,0
 Lines Priced at Promise Date =
-    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Date_Basis] = "3 - Promise date (forward)")
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Date_Basis] = "4 - Promise date (forward)")
 
 // Rows whose FX date sits beyond the last quoted rate, so the last known rate is carried forward.
 // format: #,0
@@ -821,7 +837,7 @@ Return Rate Volume % =
     CALCULATE([Ordered MT], dim_SalesOrderLine[Is_Return] = FALSE())
     )
 
-// Genuinely rejected inventory. 38 of 608 returns.
+// Genuinely rejected inventory. 36 of 576 returns.
 // format: #,0
 Physical Return Lines =
     CALCULATE([Order Lines], dim_ReturnReason[Is_Physical_Return] = TRUE())
@@ -916,6 +932,11 @@ Top 10 Product Share % =
 /*  ------------------------------------------------------------------------
     11 Data Quality
     ------------------------------------------------------------------------  */
+
+// Must be zero. Anything here means a currency-region pair is missing from d_exchange_rate.
+// format: #,0
+Unresolved Rate Lines =
+    CALCULATE(COUNTROWS(fact_SalesOrder), fact_SalesOrder[FX_Rate_Source] = "Unresolved")
 
 // Keep this on the canvas. It catches the one failure mode the bridge architecture exists to prevent.
 Fan Out Alert =
