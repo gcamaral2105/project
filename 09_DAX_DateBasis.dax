@@ -1,0 +1,271 @@
+/*  ==========================================================================
+    DATE-BASIS MEASURES
+    ==========================================================================
+    Add these to the _Measures table alongside the existing 135.
+
+    HOW IT WORKS
+      dim_DateBasis is disconnected, so a slicer on it changes nothing by
+      itself. Each measure below reads the selection with SELECTEDVALUE and
+      then re-anchors the calculation with USERELATIONSHIP.
+
+      USERELATIONSHIP cannot take a variable, so every branch has to be spelled
+      out. That is the cost of the pattern. The benefit is one measure set
+      instead of one per team.
+
+    THE THREE SCOPES — this is the part that surprises people
+      Bridge dates   filter all three facts. Revenue, volume and shipments
+                     move together.
+      Invoice dates  filter fact_Invoice only. Shipped MT will NOT move.
+      Shipment dates filter fact_Shipment only. Revenue will NOT move.
+
+      That is correct behaviour, not a bug — an invoice date has no meaning for
+      a delivery that has not been invoiced. The Basis Scope Warning measure at
+      the bottom puts it on screen so nobody has to work it out.
+
+    NAMING
+      Every measure here ends in "by Basis". Keep the originals: they are the
+      fixed-lens versions and remain correct for anything that should not move
+      when the selector changes.
+    ========================================================================== */
+
+
+// ---------------------------------------------------------------------------
+// 1 · Selector helpers
+// ---------------------------------------------------------------------------
+
+// The basis currently chosen. Defaults to Ordered date when nothing is picked
+// or when several are, so a visual never silently returns nothing.
+Selected Basis =
+    SELECTEDVALUE( dim_DateBasis[Basis_Key], "ordered" )
+
+Selected Basis Label =
+    SELECTEDVALUE( dim_DateBasis[Basis_Label], "Ordered date" )
+
+// Which facts the current basis can reach.
+Basis Scope =
+    SWITCH(
+        [Selected Basis],
+        "invoice",    "Invoice only",  "gl",         "Invoice only",
+        "inv_ship",   "Invoice only",
+        "deliv_conf", "Shipment only", "pick_plan",  "Shipment only",
+        "pick_act",   "Shipment only", "drop_plan",  "Shipment only",
+        "drop_act",   "Shipment only",
+        "All facts"
+    )
+
+// Put this on every page that carries the basis slicer. It is the difference
+// between a user trusting the report and a user filing a bug.
+Basis Scope Warning =
+    VAR S = [Basis Scope]
+    RETURN
+        SWITCH(
+            S,
+            "Invoice only",
+                "Lens: " & [Selected Basis Label]
+                    & " — filters invoice measures only. Shipment volume is unfiltered.",
+            "Shipment only",
+                "Lens: " & [Selected Basis Label]
+                    & " — filters shipment measures only. Revenue is unfiltered.",
+            "Lens: " & [Selected Basis Label] & " — filters all three facts."
+        )
+
+
+// ---------------------------------------------------------------------------
+// 2 · Revenue on the selected basis
+// ---------------------------------------------------------------------------
+// Bridge bases reach fact_Invoice through dim_SalesOrderLine, so they need the
+// bridge relationship activated, not an invoice one.
+
+Net Revenue USD by Basis =
+    SWITCH(
+        [Selected Basis],
+        "invoice",     CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], fact_Invoice[Invoice_Date] ) ),
+        "gl",          CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], fact_Invoice[Batch_GL_Date] ) ),
+        "inv_ship",    CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], fact_Invoice[Ship_Date_Actual] ) ),
+        "sched_ship",  CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Schedule_Ship_Date] ) ),
+        "actual_ship", CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Actual_Shipment_Date] ) ),
+        "promise",     CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Promise_Date] ) ),
+        "request",     CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Request_Date] ) ),
+        "fulfil",      CALCULATE( [Net Revenue USD],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Fulfillment_Date] ) ),
+        // Shipment bases cannot reach fact_Invoice at all
+        "deliv_conf",  BLANK(), "pick_plan", BLANK(), "pick_act", BLANK(),
+        "drop_plan",   BLANK(), "drop_act",  BLANK(),
+        [Net Revenue USD]        // ordered date — the active relationship
+    )
+// format: \$#,0
+
+
+// ---------------------------------------------------------------------------
+// 3 · Volume on the selected basis
+// ---------------------------------------------------------------------------
+
+Ordered MT by Basis =
+    SWITCH(
+        [Selected Basis],
+        "sched_ship",  CALCULATE( [Ordered MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Schedule_Ship_Date] ) ),
+        "actual_ship", CALCULATE( [Ordered MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Actual_Shipment_Date] ) ),
+        "promise",     CALCULATE( [Ordered MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Promise_Date] ) ),
+        "request",     CALCULATE( [Ordered MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Request_Date] ) ),
+        "fulfil",      CALCULATE( [Ordered MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Fulfillment_Date] ) ),
+        "invoice",     BLANK(), "gl", BLANK(), "inv_ship", BLANK(),
+        "deliv_conf",  BLANK(), "pick_plan", BLANK(), "pick_act", BLANK(),
+        "drop_plan",   BLANK(), "drop_act",  BLANK(),
+        [Ordered MT]
+    )
+// format: #,0
+
+Shipped MT by Basis =
+    SWITCH(
+        [Selected Basis],
+        // fact_Shipment reached through the bridge
+        "sched_ship",  CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Schedule_Ship_Date] ) ),
+        "actual_ship", CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Actual_Shipment_Date] ) ),
+        "promise",     CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Promise_Date] ) ),
+        "request",     CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Request_Date] ) ),
+        "fulfil",      CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Fulfillment_Date] ) ),
+        // fact_Shipment reached directly by its own timestamps
+        "deliv_conf",  CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Delivery_Confirm_Date] ) ),
+        "pick_plan",   CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Planned_Pickup] ) ),
+        "pick_act",    CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Actual_Pickup] ) ),
+        "drop_plan",   CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Planned_Arrival] ) ),
+        "drop_act",    CALCULATE( [Shipped MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Actual_Arrival] ) ),
+        "invoice",     BLANK(), "gl", BLANK(), "inv_ship", BLANK(),
+        [Shipped MT]
+    )
+// format: #,0
+
+Invoiced MT by Basis =
+    SWITCH(
+        [Selected Basis],
+        "invoice",     CALCULATE( [Invoiced MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Invoice[Invoice_Date] ) ),
+        "gl",          CALCULATE( [Invoiced MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Invoice[Batch_GL_Date] ) ),
+        "inv_ship",    CALCULATE( [Invoiced MT],
+                           USERELATIONSHIP( dim_Date[Date], fact_Invoice[Ship_Date_Actual] ) ),
+        "sched_ship",  CALCULATE( [Invoiced MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Schedule_Ship_Date] ) ),
+        "actual_ship", CALCULATE( [Invoiced MT],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Actual_Shipment_Date] ) ),
+        "deliv_conf",  BLANK(), "pick_plan", BLANK(), "pick_act", BLANK(),
+        "drop_plan",   BLANK(), "drop_act",  BLANK(),
+        [Invoiced MT]
+    )
+// format: #,0
+
+
+// ---------------------------------------------------------------------------
+// 4 · Counts and derived measures on the selected basis
+// ---------------------------------------------------------------------------
+
+Order Lines by Basis =
+    SWITCH(
+        [Selected Basis],
+        "sched_ship",  CALCULATE( [Order Lines],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Schedule_Ship_Date] ) ),
+        "actual_ship", CALCULATE( [Order Lines],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Actual_Shipment_Date] ) ),
+        "promise",     CALCULATE( [Order Lines],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Promise_Date] ) ),
+        "request",     CALCULATE( [Order Lines],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Request_Date] ) ),
+        "fulfil",      CALCULATE( [Order Lines],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Fulfillment_Date] ) ),
+        [Order Lines]
+    )
+// format: #,0
+
+Deliveries by Basis =
+    SWITCH(
+        [Selected Basis],
+        "deliv_conf",  CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Delivery_Confirm_Date] ) ),
+        "pick_plan",   CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Planned_Pickup] ) ),
+        "pick_act",    CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Actual_Pickup] ) ),
+        "drop_plan",   CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Planned_Arrival] ) ),
+        "drop_act",    CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], fact_Shipment[Actual_Arrival] ) ),
+        "sched_ship",  CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Schedule_Ship_Date] ) ),
+        "actual_ship", CALCULATE( [Deliveries],
+                           USERELATIONSHIP( dim_Date[Date], dim_SalesOrderLine[Actual_Shipment_Date] ) ),
+        "invoice",     BLANK(), "gl", BLANK(), "inv_ship", BLANK(),
+        [Deliveries]
+    )
+// format: #,0
+
+// Ratios rebuild from the basis-aware components rather than switching
+// themselves — one SWITCH instead of two, and the numerator and denominator
+// can never end up on different lenses.
+Realised Price per MT by Basis =
+    DIVIDE( [Net Revenue USD by Basis], [Invoiced MT by Basis] )
+// format: \$#,0.00
+
+Fulfilment Rate % by Basis =
+    DIVIDE( [Shipped MT by Basis], [Ordered MT by Basis] )
+// format: 0.0%
+
+
+// ---------------------------------------------------------------------------
+// 5 · Coverage guard
+// ---------------------------------------------------------------------------
+// A basis with low population silently drops rows. Actual shipment date is
+// 86% populated — the missing 14% is the open order book — so switching a
+// supply chain view to it removes every unshipped line. Usually intended.
+// Not always.
+
+Basis Coverage % =
+    VAR B = [Selected Basis]
+    VAR Total =
+        SWITCH(
+            [Basis Scope],
+            "Invoice only",  CALCULATE( COUNTROWS( fact_Invoice ),  ALL( dim_Date ) ),
+            "Shipment only", CALCULATE( COUNTROWS( fact_Shipment ), ALL( dim_Date ) ),
+            CALCULATE( COUNTROWS( dim_SalesOrderLine ), ALL( dim_Date ) )
+        )
+    VAR InScope =
+        SWITCH(
+            [Basis Scope],
+            "Invoice only",  CALCULATE( COUNTROWS( fact_Invoice ),  ALLSELECTED( dim_Date ) ),
+            "Shipment only", CALCULATE( COUNTROWS( fact_Shipment ), ALLSELECTED( dim_Date ) ),
+            CALCULATE( COUNTROWS( dim_SalesOrderLine ), ALLSELECTED( dim_Date ) )
+        )
+    RETURN
+        DIVIDE( InScope, Total )
+// format: 0.0%
+
+Basis Coverage Warning =
+    VAR C = [Basis Coverage %]
+    RETURN
+        IF(
+            C < 0.9,
+            "! " & FORMAT( 1 - C, "0.0%" ) & " of rows have no "
+                & [Selected Basis Label] & " and are excluded",
+            BLANK()
+        )
