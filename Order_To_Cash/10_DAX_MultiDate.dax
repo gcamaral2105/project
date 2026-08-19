@@ -1,0 +1,330 @@
+/*  ==========================================================================
+    MULTI-DATE FILTERING  —  several date fields, one or many ranges
+    ==========================================================================
+    Extends 09_DAX_DateBasis.dax. That file switches ONE lens at a time with
+    USERELATIONSHIP. This file applies SEVERAL dates simultaneously.
+
+    WHY A DIFFERENT PATTERN IS NEEDED
+      USERELATIONSHIP activates one relationship. It cannot activate two, so it
+      cannot answer "shipped in Q1 AND invoiced in Q1". For that the range has
+      to arrive as a VALUE rather than as a filter, which is what the
+      disconnected dim_Period gives you.
+
+    WHAT YOU SET UP FIRST
+      · dim_Period            disconnected, Between slicer on [Date]
+      · dim_DateBasis         set the slicer to allow MULTIPLE selection
+      · dim_DateCombine       single-select, AND or OR
+      (all three are in 10_MultiDate_Ranges.m)
+
+    AND VERSUS OR IS NOT COSMETIC — Q1 2026, measured
+      Invoice date in Q1 only            $5,674.1m
+      Shipping date in Q1 only           $5,445.3m
+      AND  shipped and invoiced in Q1    $5,421.1m
+      OR   shipped or invoiced in Q1     $5,698.4m
+    The $253m gap between the invoice figure and AND is revenue billed in Q1
+    for goods shipped in a different quarter.
+    ========================================================================== */
+
+
+// ---------------------------------------------------------------------------
+// 1 · Reading the selection
+// ---------------------------------------------------------------------------
+
+Period Start = MIN( dim_Period[Date] )
+// format: yyyy-mm-dd
+
+Period End = MAX( dim_Period[Date] )
+// format: yyyy-mm-dd
+
+Combine Mode = SELECTEDVALUE( dim_DateCombine[Combine_Key], "AND" )
+
+Selected Basis Count = COUNTROWS( VALUES( dim_DateBasis[Basis_Key] ) )
+
+
+// ---------------------------------------------------------------------------
+// 2 · THE CAPTION
+// ---------------------------------------------------------------------------
+// Drop this into a Card. It reads exactly like the sentence you asked for and
+// updates itself as the slicers change. Put it at the top of every page that
+// carries the date slicers — it is the cheapest possible defence against
+// someone screenshotting a number without its filter context.
+
+Report Period Caption =
+    VAR MinD   = [Period Start]
+    VAR MaxD   = [Period End]
+    VAR Bases  = VALUES( dim_DateBasis[Basis_Label] )
+    VAR N      = COUNTROWS( Bases )
+    VAR Joiner = IF( [Combine Mode] = "OR", " or ", " and " )
+    VAR Labels =
+        CONCATENATEX(
+            Bases,
+            dim_DateBasis[Basis_Label],
+            Joiner,
+            dim_DateBasis[Basis_Label], ASC
+        )
+    RETURN
+        IF(
+            ISBLANK( N ),
+            "No date basis selected — showing all dates",
+            "This report displays " & Labels
+                & " between " & FORMAT( MinD, "d/M/yyyy" )
+                & " and "     & FORMAT( MaxD, "d/M/yyyy" )
+        )
+
+// A shorter variant for a visual header, where the full sentence will not fit.
+Report Period Caption Short =
+    FORMAT( [Period Start], "d MMM" ) & " – " & FORMAT( [Period End], "d MMM yyyy" )
+        & "  ·  " & [Selected Basis Count] & " date basis"
+        & IF( [Selected Basis Count] = 1, "", "es" )
+        & " (" & [Combine Mode] & ")"
+
+
+// ---------------------------------------------------------------------------
+// 3 · The filter engine
+// ---------------------------------------------------------------------------
+// Two helper measures build the row sets, one per table that carries dates.
+// A basis that is not selected imposes no test, so unselected bases simply
+// drop out of the expression rather than filtering everything to nothing.
+//
+// Written as one FILTER per table rather than one per basis: fewer scans, and
+// the AND/OR logic stays in a single readable place.
+
+Bridge Rows In Period =
+    VAR MinD = [Period Start]
+    VAR MaxD = [Period End]
+    VAR Sel  = VALUES( dim_DateBasis[Basis_Key] )
+    VAR IsOr = [Combine Mode] = "OR"
+    -- Which bridge-level bases are in play
+    VAR uSched  = "sched_ship"  IN Sel
+    VAR uActual = "actual_ship" IN Sel
+    VAR uPromise= "promise"     IN Sel
+    VAR uRequest= "request"     IN Sel
+    VAR uFulfil = "fulfil"      IN Sel
+    VAR uOrdered= "ordered"     IN Sel
+    VAR AnyBridge = uSched || uActual || uPromise || uRequest || uFulfil || uOrdered
+    RETURN
+        IF(
+            NOT AnyBridge,
+            ALL( dim_SalesOrderLine ),          -- no bridge date chosen: no restriction
+            FILTER(
+                ALL( dim_SalesOrderLine ),
+                VAR mSched   = uSched   && dim_SalesOrderLine[Schedule_Ship_Date]   >= MinD
+                                        && dim_SalesOrderLine[Schedule_Ship_Date]   <= MaxD
+                VAR mActual  = uActual  && dim_SalesOrderLine[Actual_Shipment_Date] >= MinD
+                                        && dim_SalesOrderLine[Actual_Shipment_Date] <= MaxD
+                VAR mPromise = uPromise && dim_SalesOrderLine[Promise_Date]         >= MinD
+                                        && dim_SalesOrderLine[Promise_Date]         <= MaxD
+                VAR mRequest = uRequest && dim_SalesOrderLine[Request_Date]         >= MinD
+                                        && dim_SalesOrderLine[Request_Date]         <= MaxD
+                VAR mFulfil  = uFulfil  && dim_SalesOrderLine[Fulfillment_Date]     >= MinD
+                                        && dim_SalesOrderLine[Fulfillment_Date]     <= MaxD
+                VAR mOrdered = uOrdered && dim_SalesOrderLine[Ordered_Date]         >= MinD
+                                        && dim_SalesOrderLine[Ordered_Date]         <= MaxD
+                -- count how many chosen bases this row satisfies
+                VAR Hits =
+                    ( mSched + 0 ) + ( mActual + 0 ) + ( mPromise + 0 )
+                  + ( mRequest + 0 ) + ( mFulfil + 0 ) + ( mOrdered + 0 )
+                VAR Needed =
+                    ( uSched + 0 ) + ( uActual + 0 ) + ( uPromise + 0 )
+                  + ( uRequest + 0 ) + ( uFulfil + 0 ) + ( uOrdered + 0 )
+                RETURN
+                    IF( IsOr, Hits > 0, Hits = Needed )
+            )
+        )
+
+Invoice Rows In Period =
+    VAR MinD = [Period Start]
+    VAR MaxD = [Period End]
+    VAR Sel  = VALUES( dim_DateBasis[Basis_Key] )
+    VAR IsOr = [Combine Mode] = "OR"
+    VAR uInv  = "invoice"  IN Sel
+    VAR uGl   = "gl"       IN Sel
+    VAR uIShip= "inv_ship" IN Sel
+    VAR AnyInv = uInv || uGl || uIShip
+    RETURN
+        IF(
+            NOT AnyInv,
+            ALL( fact_Invoice ),
+            FILTER(
+                ALL( fact_Invoice ),
+                VAR mInv   = uInv   && fact_Invoice[Invoice_Date]     >= MinD
+                                    && fact_Invoice[Invoice_Date]     <= MaxD
+                VAR mGl    = uGl    && fact_Invoice[Batch_GL_Date]    >= MinD
+                                    && fact_Invoice[Batch_GL_Date]    <= MaxD
+                VAR mIShip = uIShip && fact_Invoice[Ship_Date_Actual] >= MinD
+                                    && fact_Invoice[Ship_Date_Actual] <= MaxD
+                VAR Hits   = ( mInv + 0 ) + ( mGl + 0 ) + ( mIShip + 0 )
+                VAR Needed = ( uInv + 0 ) + ( uGl + 0 ) + ( uIShip + 0 )
+                RETURN
+                    IF( IsOr, Hits > 0, Hits = Needed )
+            )
+        )
+
+Shipment Rows In Period =
+    VAR MinD = [Period Start]
+    VAR MaxD = [Period End]
+    VAR Sel  = VALUES( dim_DateBasis[Basis_Key] )
+    VAR IsOr = [Combine Mode] = "OR"
+    VAR uConf = "deliv_conf" IN Sel
+    VAR uPickP= "pick_plan"  IN Sel
+    VAR uPickA= "pick_act"   IN Sel
+    VAR uDropP= "drop_plan"  IN Sel
+    VAR uDropA= "drop_act"   IN Sel
+    VAR AnyShip = uConf || uPickP || uPickA || uDropP || uDropA
+    RETURN
+        IF(
+            NOT AnyShip,
+            ALL( fact_Shipment ),
+            FILTER(
+                ALL( fact_Shipment ),
+                VAR mConf  = uConf  && fact_Shipment[Delivery_Confirm_Date] >= MinD
+                                    && fact_Shipment[Delivery_Confirm_Date] <= MaxD
+                VAR mPickP = uPickP && fact_Shipment[Planned_Pickup]  >= MinD
+                                    && fact_Shipment[Planned_Pickup]  <= MaxD
+                VAR mPickA = uPickA && fact_Shipment[Actual_Pickup]   >= MinD
+                                    && fact_Shipment[Actual_Pickup]   <= MaxD
+                VAR mDropP = uDropP && fact_Shipment[Planned_Arrival] >= MinD
+                                    && fact_Shipment[Planned_Arrival] <= MaxD
+                VAR mDropA = uDropA && fact_Shipment[Actual_Arrival]  >= MinD
+                                    && fact_Shipment[Actual_Arrival]  <= MaxD
+                VAR Hits   = ( mConf + 0 ) + ( mPickP + 0 ) + ( mPickA + 0 )
+                           + ( mDropP + 0 ) + ( mDropA + 0 )
+                VAR Needed = ( uConf + 0 ) + ( uPickP + 0 ) + ( uPickA + 0 )
+                           + ( uDropP + 0 ) + ( uDropA + 0 )
+                RETURN
+                    IF( IsOr, Hits > 0, Hits = Needed )
+            )
+        )
+
+
+// ---------------------------------------------------------------------------
+// 4 · The measures users actually put on visuals
+// ---------------------------------------------------------------------------
+// Every one follows the same shape: take the base measure, apply the three row
+// sets. KEEPFILTERS so anything the user has already sliced (region, customer)
+// still applies on top rather than being replaced.
+
+Net Revenue USD (Period) =
+    CALCULATE(
+        [Net Revenue USD],
+        KEEPFILTERS( [Bridge Rows In Period] ),
+        KEEPFILTERS( [Invoice Rows In Period] )
+    )
+// format: \$#,0
+
+Ordered MT (Period) =
+    CALCULATE(
+        [Ordered MT],
+        KEEPFILTERS( [Bridge Rows In Period] )
+    )
+// format: #,0
+
+Shipped MT (Period) =
+    CALCULATE(
+        [Shipped MT],
+        KEEPFILTERS( [Bridge Rows In Period] ),
+        KEEPFILTERS( [Shipment Rows In Period] )
+    )
+// format: #,0
+
+Invoiced MT (Period) =
+    CALCULATE(
+        [Invoiced MT],
+        KEEPFILTERS( [Bridge Rows In Period] ),
+        KEEPFILTERS( [Invoice Rows In Period] )
+    )
+// format: #,0
+
+Order Lines (Period) =
+    CALCULATE(
+        [Order Lines],
+        KEEPFILTERS( [Bridge Rows In Period] )
+    )
+// format: #,0
+
+Deliveries (Period) =
+    CALCULATE(
+        [Deliveries],
+        KEEPFILTERS( [Bridge Rows In Period] ),
+        KEEPFILTERS( [Shipment Rows In Period] )
+    )
+// format: #,0
+
+Realised Price per MT (Period) =
+    DIVIDE( [Net Revenue USD (Period)], [Invoiced MT (Period)] )
+// format: \$#,0.00
+
+
+// ---------------------------------------------------------------------------
+// 5 · Independent ranges — a different window per date field
+// ---------------------------------------------------------------------------
+// Everything above shares one range across all selected dates. If a user wants
+// shipping date in Jan-Mar while invoice date runs Feb-Apr, give each field its
+// own disconnected table and its own slicer. The pattern is the same; only the
+// source of MinD and MaxD changes.
+
+Net Revenue USD (Independent Ranges) =
+    VAR ShipMin = MIN( dim_Period_Ship[Ship_Date] )
+    VAR ShipMax = MAX( dim_Period_Ship[Ship_Date] )
+    VAR InvMin  = MIN( dim_Period_Invoice[Invoice_Date_Range] )
+    VAR InvMax  = MAX( dim_Period_Invoice[Invoice_Date_Range] )
+    RETURN
+        CALCULATE(
+            [Net Revenue USD],
+            KEEPFILTERS(
+                FILTER(
+                    ALL( dim_SalesOrderLine ),
+                    dim_SalesOrderLine[Actual_Shipment_Date] >= ShipMin
+                        && dim_SalesOrderLine[Actual_Shipment_Date] <= ShipMax
+                )
+            ),
+            KEEPFILTERS(
+                FILTER(
+                    ALL( fact_Invoice ),
+                    fact_Invoice[Invoice_Date] >= InvMin
+                        && fact_Invoice[Invoice_Date] <= InvMax
+                )
+            )
+        )
+// format: \$#,0
+
+Independent Ranges Caption =
+    "Shipped "
+        & FORMAT( MIN( dim_Period_Ship[Ship_Date] ), "d/M/yyyy" ) & " to "
+        & FORMAT( MAX( dim_Period_Ship[Ship_Date] ), "d/M/yyyy" )
+        & "  ·  invoiced "
+        & FORMAT( MIN( dim_Period_Invoice[Invoice_Date_Range] ), "d/M/yyyy" ) & " to "
+        & FORMAT( MAX( dim_Period_Invoice[Invoice_Date_Range] ), "d/M/yyyy" )
+
+
+// ---------------------------------------------------------------------------
+// 6 · Guards
+// ---------------------------------------------------------------------------
+
+// Fires when the chosen bases cannot all reach the same fact, which is the one
+// combination that produces a confusing result rather than a wrong one.
+Multi Basis Warning =
+    VAR Sel = VALUES( dim_DateBasis[Scope] )
+    VAR N   = COUNTROWS( Sel )
+    RETURN
+        IF(
+            N > 1,
+            "Mixed scopes selected (" & CONCATENATEX( Sel, dim_DateBasis[Scope], ", " )
+                & "). Measures are filtered only by the bases that reach their own table.",
+            BLANK()
+        )
+
+// Sanity check: with one basis selected this must equal the equivalent
+// single-lens measure from 09_DAX_DateBasis.dax. If it does not, a column in
+// one of the three row-set measures is pointing at the wrong table.
+Period Reconciliation Check =
+    VAR MultiVal  = [Net Revenue USD (Period)]
+    VAR SingleVal = [Net Revenue USD by Basis]
+    RETURN
+        IF(
+            [Selected Basis Count] = 1
+                && NOT ISBLANK( SingleVal )
+                && ABS( MultiVal - SingleVal ) > 1,
+            "Mismatch: " & FORMAT( MultiVal - SingleVal, "#,0" ),
+            "OK"
+        )

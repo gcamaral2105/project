@@ -60,6 +60,35 @@ tbody tr:hover{background:#F8FAFD}
 .pill{display:inline-block;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px}
 .foot{margin-top:26px;padding-top:18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--mut);line-height:1.65}
 .page{display:none}.page.on{display:block}
+
+.slicers{background:#fff;border:1px solid var(--line);border-radius:11px;padding:14px 16px 12px;margin-bottom:16px;box-shadow:0 1px 3px rgba(24,44,84,.05)}
+.slrow{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+.slgrp{min-width:0}
+.sllab{font-size:9.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--mut);font-weight:800;margin-bottom:6px}
+.slchips{display:flex;gap:5px;flex-wrap:wrap}
+.slchip{font-size:11.5px;font-weight:600;padding:5px 11px;border-radius:7px;border:1px solid var(--line);
+background:#fff;color:#3B4557;cursor:pointer;font-family:inherit;transition:.12s;white-space:nowrap}
+.slchip:hover{border-color:#B9C6DC;color:var(--ink)}
+.slchip.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+.slchip.team{border-style:dashed}
+.slteam{font-size:9px;text-transform:uppercase;letter-spacing:.7px;color:#9AA5B8;font-weight:800;margin:8px 0 4px}
+.slnote{margin-top:11px;padding:9px 12px;border-radius:8px;font-size:11.5px;line-height:1.5;display:flex;gap:9px;align-items:flex-start}
+.slnote b{font-weight:800}
+.sn-all{background:#EFF4FC;border:1px solid #C6D7EF;color:#274B87}
+.sn-inv{background:#FFF9EE;border:1px solid #F0DCB4;color:#7A5518}
+.sn-shp{background:#F3F0FA;border:1px solid #D6CCEC;color:#4A3A70}
+.slmeta{font-size:10.5px;color:var(--mut);margin-top:7px}
+.dim{opacity:.35;pointer-events:none}
+.caption{background:linear-gradient(100deg,#1F3864,#2C4E86);color:#fff;border-radius:10px;
+padding:13px 17px;margin-bottom:14px;font-size:14px;font-weight:600;letter-spacing:-.1px;
+box-shadow:0 2px 10px rgba(31,56,100,.18);display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+.caption .tag{font-size:9.5px;text-transform:uppercase;letter-spacing:1px;background:rgba(255,255,255,.18);
+padding:3px 9px;border-radius:20px;font-weight:800}
+.rng{display:flex;gap:6px;align-items:center}
+.rng select{font-family:inherit;font-size:11.5px;font-weight:600;padding:5px 9px;border-radius:7px;
+border:1px solid var(--line);background:#fff;color:#3B4557;cursor:pointer}
+.rng span{font-size:11px;color:var(--mut);font-weight:600}
+
 @media(max-width:1150px){.kpis{grid-template-columns:repeat(3,1fr)}.g2,.g3,.g21,.g12{grid-template-columns:1fr}}
 </style></head><body>
 <div class="app">
@@ -71,12 +100,54 @@ tbody tr:hover{background:#F8FAFD}
   Built on the v2 sales order extract with the data corrections applied. It exists so the model and KPI set can be reviewed before anything is built in Power BI.</div>
   <div class="note" style="background:#EFF9F2;border-color:#BCE2C9;color:#1B6B37">
   <b>Currency closed out</b>The v2 query supplies Exchange_Rate directly and it is exact. USC is 1:1 with USD. Coverage 100.0%.</div>
+  <div class="note" style="background:#EFF4FC;border-color:#C6D7EF;color:#274B87">
+  <b>Date basis is live</b>Pick a lens at the top of the page. Supply chain uses ship dates, finance uses invoice date, transport uses trip stages — the trend re-anchors and the scope note tells you what it can reach.</div>
 </aside>
 <main class="main">
   <div class="bar">
     <div><h1 id="ptitle">Executive Summary</h1>
       <div class="meta">1 January – 13 August 2026 · 68,977 order lines · 79,357 invoice lines · 59,947 deliveries</div></div>
   </div>
+<div class="caption" id="cap"></div>
+  <div class="slrow" style="margin-bottom:14px;gap:26px">
+    <div class="slgrp"><div class="sllab">Period range</div>
+      <div class="rng"><select id="rFrom"><option value="0" selected>Jan 2026</option><option value="1">Feb 2026</option><option value="2">Mar 2026</option><option value="3">Apr 2026</option><option value="4">May 2026</option><option value="5">Jun 2026</option><option value="6">Jul 2026</option><option value="7">Aug 2026</option></select><span>to</span><select id="rTo"><option value="0">Jan 2026</option><option value="1">Feb 2026</option><option value="2">Mar 2026</option><option value="3">Apr 2026</option><option value="4">May 2026</option><option value="5">Jun 2026</option><option value="6">Jul 2026</option><option value="7" selected>Aug 2026</option></select></div></div>
+    <div class="slgrp"><div class="sllab">Combine multiple dates</div>
+      <div class="slchips" id="combineSel">
+        <button class="slchip on" data-combine="AND">AND — all selected in range</button>
+        <button class="slchip" data-combine="OR">OR — any selected in range</button></div>
+      <div class="slmeta">Only applies when more than one basis is picked</div></div>
+    <div class="slgrp"><div class="sllab">Basis selection</div>
+      <div class="slchips">
+        <button class="slchip on" data-multi="single">Single</button>
+        <button class="slchip" data-multi="multi">Multi-select</button></div>
+      <div class="slmeta">Multi-select lets you combine e.g. shipping + invoice date</div></div>
+  </div>
+  <div class="slicers">
+  <div class="slrow">
+    <div class="slgrp" style="flex:1 1 100%">
+      <div class="sllab">Date basis — which date the whole page is anchored on</div>
+      <div class="slrow" style="gap:26px"><div class="slgrp"><div class="slteam">Commercial</div><div class="slchips"><button class="slchip on" data-basis="ordered" data-scope="All facts" data-label="Ordered date" data-cov="100.0">Ordered date</button></div></div><div class="slgrp"><div class="slteam">Supply chain</div><div class="slchips"><button class="slchip" data-basis="sched_ship" data-scope="All facts" data-label="Scheduled ship date" data-cov="99.5">Scheduled ship date</button><button class="slchip" data-basis="actual_ship" data-scope="All facts" data-label="Actual shipment date" data-cov="86.0">Actual shipment date</button><button class="slchip" data-basis="promise" data-scope="All facts" data-label="Promise date" data-cov="94.5">Promise date</button><button class="slchip" data-basis="request" data-scope="All facts" data-label="Requested date" data-cov="100.0">Requested date</button><button class="slchip" data-basis="fulfil" data-scope="All facts" data-label="Fulfilment date" data-cov="92.1">Fulfilment date</button></div></div><div class="slgrp"><div class="slteam">Finance</div><div class="slchips"><button class="slchip" data-basis="invoice" data-scope="Invoice only" data-label="Invoice date" data-cov="100.0">Invoice date</button><button class="slchip" data-basis="gl" data-scope="Invoice only" data-label="GL posting date" data-cov="100.0">GL posting date</button><button class="slchip" data-basis="inv_ship" data-scope="Invoice only" data-label="Invoice ship date" data-cov="95.2">Invoice ship date</button></div></div><div class="slgrp"><div class="slteam">Transportation</div><div class="slchips"><button class="slchip" data-basis="deliv_conf" data-scope="Shipment only" data-label="Delivery confirm date" data-cov="76.6">Delivery confirm date</button><button class="slchip" data-basis="pick_plan" data-scope="Shipment only" data-label="Pickup planned" data-cov="78.2">Pickup planned</button><button class="slchip" data-basis="pick_act" data-scope="Shipment only" data-label="Pickup actual" data-cov="75.7">Pickup actual</button><button class="slchip" data-basis="drop_plan" data-scope="Shipment only" data-label="Drop-off planned" data-cov="78.2">Drop-off planned</button><button class="slchip" data-basis="drop_act" data-scope="Shipment only" data-label="Drop-off actual" data-cov="75.7">Drop-off actual</button></div></div></div>
+    </div>
+  </div>
+  <div class="slnote sn-all" id="basisNote"></div>
+  <div class="slrow" style="margin-top:14px;border-top:1px solid var(--line);padding-top:13px">
+    <div class="slgrp"><div class="sllab">Region</div><div class="slchips" data-slicer="region">
+      <button class="slchip on">All</button><button class="slchip">NAM</button><button class="slchip">EUR</button>
+      <button class="slchip">SAM</button><button class="slchip">AUS</button></div></div>
+    <div class="slgrp"><div class="sllab">Plant → product</div><div class="slchips" data-slicer="org">
+      <button class="slchip on">All plants</button><button class="slchip">EUR-7572</button>
+      <button class="slchip">NAM-1104</button><button class="slchip">SAM-3301</button></div>
+      <div class="slmeta">Cascades to product — one table, so impossible pairs are never offered</div></div>
+    <div class="slgrp"><div class="sllab">Currency</div><div class="slchips" data-slicer="cur">
+      <button class="slchip on">All</button><button class="slchip">USD</button><button class="slchip">EUR</button>
+      <button class="slchip">BRL</button><button class="slchip">USC</button></div></div>
+    <div class="slgrp"><div class="sllab">Line status</div><div class="slchips" data-slicer="status">
+      <button class="slchip on">All</button><button class="slchip">Open</button>
+      <button class="slchip">Closed</button><button class="slchip">Returns only</button></div></div>
+  </div>
+  <div class="slmeta">Dimension slicers are illustrative in this prototype — they show what the report will carry. The date basis is live: pick one and the trend charts re-anchor.</div>
+</div>
   <div class="page on" id="p1">
 <div class="kpis">
 <div class="k "><div class="l">Net revenue</div><div class="v">$15.03bn</div><div class="c">22.2m tonnes billed</div></div>
@@ -298,6 +369,8 @@ tbody tr:hover{background:#F8FAFD}
     <b>Corrections applied.</b> 48 malformed shipment rows removed (left in, tonnage reads 13× high). Return quantities sign-normalised. Sentinel dates beyond 2030 nulled. Non-breaking spaces stripped from return reasons. Currency resolved through three tiers: identity for USD and USC, the source Exchange_Rate where supplied, then the Corporate rate table.
     <br><br>
     <b>Read with care.</b> August 2026 is a 13-day partial month and is faded in every trend chart — it is not a decline. Customer and product identities are masked. The price bridge covers 78% of revenue (NAM and EUR only). 1,364 lines convert at a rate carried forward from 2026-08-31, so any backlog value including them is a forward estimate. Invoice and shipment figures come from the earlier extracts — only the sales order side is v2.
+    <br><br>
+    <b>About the date basis.</b> Fourteen lenses across three teams. Where a date physically lives decides what it can filter: bridge dates (ordered, scheduled ship, actual shipment, promise, requested, fulfilment) reach all three facts; invoice dates reach fact_Invoice only; trip-stage dates reach fact_Shipment only. That is why revenue disappears from the trend on a transportation lens — a trip timestamp has no path to an invoice, so the series is dropped rather than faked. The model implementation is in 08_DateBasis_And_Slicers and 09_DAX_DateBasis.
   </div>
 </main>
 </div>
@@ -320,10 +393,10 @@ const LEG={display:true,position:'top',align:'end',labels:{usePointStyle:true,po
 const SPEC={};
 const R=(id,fn)=>SPEC[id]=fn;
 
-const revChart=()=>({data:{labels:ML,datasets:[
- {type:'bar',label:'Net revenue ($m)',data:D.inv.rev_m,backgroundColor:fc('#2E6FD9',D.inv.rev_m),borderRadius:5,yAxisID:'y',order:2,barPercentage:.62},
- {type:'line',label:'Tonnes (000)',data:D.inv.mt_m,borderColor:'#E8A33D',borderWidth:2.6,tension:.35,pointRadius:4,
-   pointBackgroundColor:'#fff',pointBorderWidth:2.2,yAxisID:'y1',order:1,segment:dash}]},
+const revChart=()=>({data:{labels:ML,datasets:[].concat(
+ D.basisPrimaryNull?[]:[{type:'bar',label:D.basisPrimaryLabel||'Net revenue ($m)',data:D.inv.rev_m,backgroundColor:fc('#2E6FD9',D.inv.rev_m),borderRadius:5,yAxisID:'y',order:2,barPercentage:.62}],
+ [{type:'line',label:D.basisSecondaryLabel||'Tonnes (000)',data:D.inv.mt_m,borderColor:'#E8A33D',borderWidth:2.6,tension:.35,pointRadius:4,
+   pointBackgroundColor:'#fff',pointBorderWidth:2.2,yAxisID:D.basisPrimaryNull?'y':'y1',order:1,segment:dash}])},
  options:{interaction:{mode:'index',intersect:false},plugins:{legend:LEG,tooltip:{callbacks:{
    label:c=>c.datasetIndex===0?'Revenue $'+F(c.parsed.y)+'m':'Volume '+F(c.parsed.y)+'k t',
    afterBody:i=>PARTIAL(i[0].dataIndex)?['','Partial month - 13 days only']:[]}}},
@@ -536,4 +609,134 @@ function show(pid,label){
 }
 document.querySelectorAll('.pg').forEach(b=>b.addEventListener('click',()=>show(b.dataset.go,b.textContent)));
 draw('p1');
+const BSERIES={"ordered": {"primary": [1565.3, 1569.1, 2352.0, 1817.1, 1955.0, 1552.5, 915.2, 101.5], "primary_label": "Net revenue ($m)", "secondary": [3340.6, 1863.4, 2187.1, 2176.8, 2302.3, 1923.6, 2084.0, 932.3], "secondary_label": "Ordered (k t)"}, "sched_ship": {"primary": [1602.4, 1836.5, 2075.4, 2104.9, 2058.6, 2328.3, 1974.2, 619.8], "primary_label": "Net revenue ($m)", "secondary": [3212.4, 2755.0, 2874.6, 3091.1, 2344.4, 3127.2, 2876.1, 2032.3], "secondary_label": "Ordered (k t)"}, "actual_ship": {"primary": [1707.5, 1827.5, 2055.3, 2008.3, 2059.4, 2458.1, 2032.8, 643.1], "primary_label": "Net revenue ($m)", "secondary": [3059.5, 2781.0, 2815.3, 2776.1, 2427.9, 2714.1, 2937.5, 827.3], "secondary_label": "Ordered (k t)"}, "promise": {"primary": [1249.1, 1585.0, 1969.6, 1843.5, 1824.3, 1928.5, 1399.1, 657.5], "primary_label": "Net revenue ($m)", "secondary": [2638.5, 2150.2, 2201.5, 2780.9, 1554.0, 2149.6, 2039.6, 1071.8], "secondary_label": "Ordered (k t)"}, "request": {"primary": [1307.6, 1824.7, 2149.1, 2023.2, 2025.4, 2304.9, 1941.9, 983.9], "primary_label": "Net revenue ($m)", "secondary": [2910.1, 2805.3, 2930.8, 3395.0, 2422.7, 2827.6, 2678.2, 1955.7], "secondary_label": "Ordered (k t)"}, "fulfil": {"primary": [1734.3, 1868.6, 2104.8, 2049.6, 2092.5, 2483.8, 2061.5, 643.6], "primary_label": "Net revenue ($m)", "secondary": [3225.4, 2789.4, 2921.1, 2784.5, 2416.7, 2928.5, 2980.5, 883.1], "secondary_label": "Ordered (k t)"}, "invoice": {"primary": [1714.9, 1870.3, 2088.9, 2055.9, 2118.5, 2518.0, 2025.0, 641.4], "primary_label": "Net revenue ($m)", "secondary": [3340.1, 2985.6, 3115.9, 2966.9, 2615.6, 3222.7, 3175.6, 827.4], "secondary_label": "Invoiced (k t)"}, "gl": {"primary": [1720.3, 1871.1, 2088.9, 2055.9, 2118.5, 2507.2, 2035.2, 641.9], "primary_label": "Net revenue ($m)", "secondary": [3343.9, 3001.7, 3123.3, 2959.5, 2615.7, 3174.6, 3220.4, 830.7], "secondary_label": "Invoiced (k t)"}, "inv_ship": {"primary": [1711.6, 1828.1, 2056.8, 2016.3, 2067.3, 2458.3, 2034.0, 643.4], "primary_label": "Net revenue ($m)", "secondary": [3242.5, 2974.2, 3026.3, 2968.2, 2611.8, 3050.9, 3114.9, 767.2], "secondary_label": "Invoiced (k t)"}, "deliv_conf": {"primary": null, "primary_label": "Revenue not reachable on this basis", "secondary": [3168.5, 2829.2, 2850.5, 2760.2, 2386.5, 2832.1, 3090.1, 844.7], "secondary_label": "Shipped (k t)", "deliveries": [7635, 7369, 8304, 7862, 8201, 8522, 7598, 2847]}, "pick_plan": {"primary": null, "primary_label": "Revenue not reachable on this basis", "secondary": [2637.0, 2398.7, 2495.4, 2657.6, 2030.4, 2608.9, 2553.7, 664.3], "secondary_label": "Shipped (k t)", "deliveries": [6255, 6142, 6874, 6757, 7034, 7324, 6758, 3195]}, "pick_act": {"primary": null, "primary_label": "Revenue not reachable on this basis", "secondary": [3420.6, 2968.3, 2852.4, 2759.3, 2453.3, 2811.4, 3049.3, 840.9], "secondary_label": "Shipped (k t)", "deliveries": [7590, 7323, 8358, 7862, 8110, 8476, 7440, 2690]}, "drop_plan": {"primary": null, "primary_label": "Revenue not reachable on this basis", "secondary": [2991.9, 2864.1, 2724.1, 2872.0, 2344.9, 2813.3, 3018.4, 1041.5], "secondary_label": "Shipped (k t)", "deliveries": [6343, 6903, 8347, 8221, 8130, 8353, 7438, 4144]}, "drop_act": {"primary": null, "primary_label": "Revenue not reachable on this basis", "secondary": [3421.2, 2967.5, 2853.3, 2759.5, 2453.4, 2811.0, 3048.9, 841.8], "secondary_label": "Shipped (k t)", "deliveries": [7588, 7316, 8366, 7863, 8111, 8473, 7435, 2699]}};
+const BASIS={"ordered": {"key": "ordered", "label": "Ordered date", "team": "Commercial", "table": "bridge", "scope": "All facts", "lines": [7499, 6966, 9813, 8614, 9076, 7467, 6476, 2237], "ordered": [3340.6, 1863.4, 2187.1, 2176.8, 2302.3, 1923.6, 2084.0, 932.3], "shipped": [2952.7, 1849.6, 2061.8, 1884.9, 1967.3, 1674.3, 1726.6, 350.5], "populated": 68977, "coverage": 100.0}, "sched_ship": {"key": "sched_ship", "label": "Scheduled ship date", "team": "Supply chain", "table": "bridge", "scope": "All facts", "lines": [7741, 7580, 8640, 8615, 8829, 9212, 8626, 5551], "ordered": [3212.4, 2755.0, 2874.6, 3091.1, 2344.4, 3127.2, 2876.1, 2032.3], "shipped": [3029.0, 2760.7, 2753.5, 2966.2, 2212.8, 2888.5, 2864.2, 800.9], "populated": 68651, "coverage": 99.5}, "actual_ship": {"key": "actual_ship", "label": "Actual shipment date", "team": "Supply chain", "table": "bridge", "scope": "All facts", "lines": [7449, 7151, 8128, 7797, 8171, 9070, 8180, 3275], "ordered": [3059.5, 2781.0, 2815.3, 2776.1, 2427.9, 2714.1, 2937.5, 827.3], "shipped": [3058.5, 2796.0, 2810.1, 2756.7, 2416.4, 2717.3, 2941.5, 827.5], "populated": 59336, "coverage": 86.0}, "promise": {"key": "promise", "label": "Promise date", "team": "Supply chain", "table": "bridge", "scope": "All facts", "lines": [6701, 7292, 8432, 8401, 8364, 8478, 7866, 5219], "ordered": [2638.5, 2150.2, 2201.5, 2780.9, 1554.0, 2149.6, 2039.6, 1071.8], "shipped": [2393.0, 2135.6, 2132.0, 2610.4, 1421.3, 1953.0, 1977.7, 472.4], "populated": 65183, "coverage": 94.5}, "request": {"key": "request", "label": "Requested date", "team": "Supply chain", "table": "bridge", "scope": "All facts", "lines": [7065, 7695, 8646, 8689, 8620, 9353, 8606, 6017], "ordered": [2910.1, 2805.3, 2930.8, 3395.0, 2422.7, 2827.6, 2678.2, 1955.7], "shipped": [2743.9, 2794.0, 2809.7, 3250.4, 2311.5, 2589.2, 2671.4, 792.5], "populated": 68976, "coverage": 100.0}, "fulfil": {"key": "fulfil", "label": "Fulfilment date", "team": "Supply chain", "table": "bridge", "scope": "All facts", "lines": [7900, 7737, 8853, 8449, 8755, 9591, 8667, 3488], "ordered": [3225.4, 2789.4, 2921.1, 2784.5, 2416.7, 2928.5, 2980.5, 883.1], "shipped": [3078.4, 2796.0, 2810.1, 2756.7, 2348.4, 2750.2, 2976.6, 827.5], "populated": 63555, "coverage": 92.1}, "invoice": {"key": "invoice", "label": "Invoice date", "team": "Finance", "table": "invoice", "scope": "Invoice only", "revenue": [1714.9, 1870.3, 2088.9, 2055.9, 2118.5, 2518.0, 2025.0, 641.4], "mt": [3340.1, 2985.6, 3115.9, 2966.9, 2615.6, 3222.7, 3175.6, 827.4], "lines": [10102, 10287, 11536, 10661, 11315, 11860, 10560, 3036], "populated": 79576, "coverage": 100.0}, "gl": {"key": "gl", "label": "GL posting date", "team": "Finance", "table": "invoice", "scope": "Invoice only", "revenue": [1720.3, 1871.1, 2088.9, 2055.9, 2118.5, 2507.2, 2035.2, 641.9], "mt": [3343.9, 3001.7, 3123.3, 2959.5, 2615.7, 3174.6, 3220.4, 830.7], "lines": [10098, 10292, 11531, 10663, 11314, 11859, 10557, 3043], "populated": 79576, "coverage": 100.0}, "inv_ship": {"key": "inv_ship", "label": "Invoice ship date", "team": "Finance", "table": "invoice", "scope": "Invoice only", "revenue": [1711.6, 1828.1, 2056.8, 2016.3, 2067.3, 2458.3, 2034.0, 643.4], "mt": [3242.5, 2974.2, 3026.3, 2968.2, 2611.8, 3050.9, 3114.9, 767.2], "lines": [10151, 9690, 10932, 10074, 10775, 11509, 9502, 2852], "populated": 75721, "coverage": 95.2}, "deliv_conf": {"key": "deliv_conf", "label": "Delivery confirm date", "team": "Transportation", "table": "shipment", "scope": "Shipment only", "shipped_mt": [3168.5, 2829.2, 2850.5, 2760.2, 2386.5, 2832.1, 3090.1, 844.7], "deliveries": [7635, 7369, 8304, 7862, 8201, 8522, 7598, 2847], "lines": [8336, 8184, 9087, 8696, 9155, 9430, 8433, 3222], "populated": 64695, "coverage": 76.6}, "pick_plan": {"key": "pick_plan", "label": "Pickup planned", "team": "Transportation", "table": "shipment", "scope": "Shipment only", "shipped_mt": [2637.0, 2398.7, 2495.4, 2657.6, 2030.4, 2608.9, 2553.7, 664.3], "deliveries": [6255, 6142, 6874, 6757, 7034, 7324, 6758, 3195], "lines": [6845, 6916, 7539, 7572, 7889, 8202, 7494, 3621], "populated": 66105, "coverage": 78.2}, "pick_act": {"key": "pick_act", "label": "Pickup actual", "team": "Transportation", "table": "shipment", "scope": "Shipment only", "shipped_mt": [3420.6, 2968.3, 2852.4, 2759.3, 2453.3, 2811.4, 3049.3, 840.9], "deliveries": [7590, 7323, 8358, 7862, 8110, 8476, 7440, 2690], "lines": [8293, 8101, 9171, 8664, 9092, 9352, 8240, 2946], "populated": 63977, "coverage": 75.7}, "drop_plan": {"key": "drop_plan", "label": "Drop-off planned", "team": "Transportation", "table": "shipment", "scope": "Shipment only", "shipped_mt": [2991.9, 2864.1, 2724.1, 2872.0, 2344.9, 2813.3, 3018.4, 1041.5], "deliveries": [6343, 6903, 8347, 8221, 8130, 8353, 7438, 4144], "lines": [6784, 7579, 9128, 9029, 9076, 9272, 8329, 4780], "populated": 66096, "coverage": 78.2}, "drop_act": {"key": "drop_act", "label": "Drop-off actual", "team": "Transportation", "table": "shipment", "scope": "Shipment only", "shipped_mt": [3421.2, 2967.5, 2853.3, 2759.5, 2453.4, 2811.0, 3048.9, 841.8], "deliveries": [7588, 7316, 8366, 7863, 8111, 8473, 7435, 2699], "lines": [8299, 8079, 9194, 8665, 9093, 9349, 8235, 2955], "populated": 63969, "coverage": 75.7}};
+
+let CURBASIS='ordered';
+function basisNote(){
+  const b=BASIS[CURBASIS], n=document.getElementById('basisNote');
+  const cls={'All facts':'sn-all','Invoice only':'sn-inv','Shipment only':'sn-shp'}[b.scope];
+  n.className='slnote '+cls;
+  const txt={'All facts':'filters all three facts — revenue, volume and shipments move together.',
+             'Invoice only':'filters invoice measures only. Shipment volume stays unfiltered, because a delivery that has not been invoiced has no invoice date.',
+             'Shipment only':'filters shipment measures only. Revenue stays unfiltered.'}[b.scope];
+  n.innerHTML='<b>'+b.scope+'</b><span>Lens: <b>'+b.label+'</b> — '+txt
+    +' Coverage '+b.coverage.toFixed(1)+'% of rows'
+    +(b.coverage<90?' — the remainder has no '+b.label.toLowerCase()+' and is excluded.':'.')+'</span>';
+}
+function applyBasis(k){
+  CURBASIS=k;
+  document.querySelectorAll('[data-basis]').forEach(x=>x.classList.toggle('on',x.dataset.basis===k));
+  basisNote();
+
+  const s=BSERIES[k];
+  // Re-anchor the main trend. Revenue is null on shipment bases — it is not
+  // reachable from a trip timestamp, so the series is dropped rather than faked.
+  D.inv.rev_m = s.primary || D.inv.rev_m;
+  D.inv.mt_m  = s.secondary;
+  D.basisPrimaryNull = (s.primary === null);
+  D.basisPrimaryLabel = s.primary_label;
+  D.basisSecondaryLabel = s.secondary_label;
+  Object.keys(BUILT).forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    const ch=Chart.getChart(el); if(ch) ch.destroy();
+    delete BUILT[id];
+  });
+  document.querySelectorAll('.page.on').forEach(p=>draw(p.id));
+}
+document.querySelectorAll('[data-basis]').forEach(btn=>
+  btn.addEventListener('click',()=>applyBasis(btn.dataset.basis)));
+// Illustrative slicers: toggle only, no recompute
+document.querySelectorAll('[data-slicer] .slchip').forEach(btn=>
+  btn.addEventListener('click',()=>{
+    btn.parentElement.querySelectorAll('.slchip').forEach(x=>x.classList.remove('on'));
+    btn.classList.add('on');
+  }));
+basisNote();
+
+
+const COMBO={"invoice": [1714.9, 1870.3, 2088.9, 2055.9, 2118.5, 2518.0, 2025.0, 641.4], "actual_ship": [1707.5, 1827.5, 2055.3, 2008.3, 2059.4, 2458.1, 2032.8, 643.1], "ship_AND_invoice": [1693.9, 1816.0, 2027.6, 1990.6, 2053.2, 2485.5, 2034.5, 642.6], "ship_OR_invoice": [1728.5, 1881.8, 2116.6, 2073.6, 2124.8, 2490.6, 2023.3, 641.9], "q1": {"total": 15070115163.565989, "inv": 5674114943.300011, "ship": 5445328895.767782, "and": 5421092042.541089, "or": 5698351796.526704}};
+
+let SELBASES=['ordered'], COMBINE='AND', MULTI=false, RFROM=0, RTO=7;
+const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug'];
+const fmtD=(i,last)=>{const d=last?new Date(2026,i+1,0):new Date(2026,i,1);
+  return d.getDate()+'/'+(d.getMonth()+1)+'/'+d.getFullYear();};
+
+function caption(){
+  const labs=SELBASES.map(k=>BASIS[k].label);
+  const join=(COMBINE==='OR'?' or ':' and ');
+  const scopes=[...new Set(SELBASES.map(k=>BASIS[k].scope))];
+  const txt='This report displays '+labs.join(join)+' between '
+        +fmtD(RFROM,false)+' and '+fmtD(RTO,true);
+  const warn = scopes.length>1
+    ? '<span class="tag" style="background:rgba(232,163,61,.35)">mixed scope</span>' : '';
+  document.getElementById('cap').innerHTML =
+    '<span class="tag">'+(SELBASES.length>1?COMBINE:'single basis')+'</span>'+warn+'<span>'+txt+'</span>';
+}
+function slice(a){ return a.slice(RFROM,RTO+1); }
+
+function activeSeries(){
+  // Two bases with a real AND/OR answer are precomputed; anything else falls
+  // back to the first selected basis so nothing is invented.
+  const set=[...SELBASES].sort().join('|');
+  if(set==='actual_ship|invoice')
+    return {primary:COMBO[COMBINE==='AND'?'ship_AND_invoice':'ship_OR_invoice'],
+            label:'Net revenue ($m) — '+COMBINE, exact:true};
+  const b=BSERIES[SELBASES[0]];
+  return {primary:b.primary, label:b.primary_label, secondary:b.secondary,
+          secondary_label:b.secondary_label, exact:SELBASES.length===1};
+}
+function redraw(){
+  const a=activeSeries();
+  D.basisPrimaryNull=(a.primary===null);
+  D.basisPrimaryLabel=a.label;
+  D.basisSecondaryLabel=a.secondary_label||'Tonnes (000)';
+  D.inv.rev_m = a.primary ? slice(a.primary) : slice(BSERIES[SELBASES[0]].secondary);
+  D.inv.mt_m  = slice(a.secondary || BSERIES[SELBASES[0]].secondary);
+  ML.length=0; slice(MONTHS).forEach(m=>ML.push(m));
+  Object.keys(BUILT).forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    const ch=Chart.getChart(el); if(ch) ch.destroy();
+    delete BUILT[id];
+  });
+  document.querySelectorAll('.page.on').forEach(p=>draw(p.id));
+  caption(); basisNote();
+}
+// basis chips honour single vs multi select
+document.querySelectorAll('[data-basis]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const k=btn.dataset.basis;
+    if(!MULTI){ SELBASES=[k]; }
+    else if(SELBASES.includes(k)){ if(SELBASES.length>1) SELBASES=SELBASES.filter(x=>x!==k); }
+    else { SELBASES.push(k); }
+    document.querySelectorAll('[data-basis]').forEach(x=>
+      x.classList.toggle('on',SELBASES.includes(x.dataset.basis)));
+    CURBASIS=SELBASES[0];
+    redraw();
+  },true);
+});
+document.querySelectorAll('[data-combine]').forEach(b=>b.addEventListener('click',()=>{
+  COMBINE=b.dataset.combine;
+  document.querySelectorAll('[data-combine]').forEach(x=>x.classList.toggle('on',x===b));
+  redraw();
+}));
+document.querySelectorAll('[data-multi]').forEach(b=>b.addEventListener('click',()=>{
+  MULTI=(b.dataset.multi==='multi');
+  document.querySelectorAll('[data-multi]').forEach(x=>x.classList.toggle('on',x===b));
+  if(!MULTI && SELBASES.length>1){ SELBASES=[SELBASES[0]];
+    document.querySelectorAll('[data-basis]').forEach(x=>
+      x.classList.toggle('on',SELBASES.includes(x.dataset.basis))); }
+  redraw();
+}));
+['rFrom','rTo'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el) el.addEventListener('change',()=>{
+    RFROM=+document.getElementById('rFrom').value;
+    RTO=+document.getElementById('rTo').value;
+    if(RTO<RFROM){ RTO=RFROM; document.getElementById('rTo').value=RTO; }
+    redraw();
+  });
+});
+caption();
+
 </script></body></html>
